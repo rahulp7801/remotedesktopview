@@ -1,5 +1,48 @@
 # Voice-Controlled Remote Desktop Agent
 
+## Hackathon Challenge
+
+**UCSB Hackathon Challenge: Make Your App Talk Back (Composite Agent Edition)**
+
+Build a real-time voice experience that goes beyond buttons and text. For this challenge, you will build a composite voice agent by combining Deepgram streaming speech recognition (Flux) with your own orchestration logic, an LLM, and autonomous tools. The goal is to create an application that can listen, reason, and act in real time.
+
+This challenge rewards teams that design voice experiences that feel fast, useful, and accessible.
+
+### Core Requirements
+
+Your project must:
+1. ✅ Use Deepgram streaming STT via Flux
+2. ✅ Use an LLM with function calling (Claude via MCP)
+3. ✅ Implement at least two real functions that perform meaningful actions (we use Agent-S for desktop GUI automation + screenshot capture)
+
+### Bonus Points
+
+Additional points may be awarded for incorporating:
+- [ ] Deepgram TTS for spoken responses
+- [ ] Eager End-of-Turn (eager EOT) to begin reasoning before the user fully finishes speaking
+- [ ] Accessibility features:
+  - [ ] Live captions or readable transcript UI
+  - [ ] Voice commands like "repeat," "slow down," or "summarize"
+  - [ ] Screen-reader-friendly or keyboard-only interfaces
+  - [ ] Multilingual support
+  - [ ] Noise-robust or push-to-talk interaction modes
+
+### Judging Criteria
+
+Projects evaluated on:
+- **Autonomy & usefulness (40%)** - How effectively does the agent use tools to complete tasks?
+- **Real-time user experience (30%)** - Latency, turn-taking, interruptions, and responsiveness
+- **Engineering quality (20%)** - Architecture, reliability, and error handling
+- **Accessibility impact (10%)** - How well does the project expand access and usability?
+
+### Submission Requirements
+
+- [ ] A short demo video (30–90 seconds)
+- [ ] A GitHub repository with setup instructions
+- [ ] A brief description of the functions/tools used and what they enable
+
+---
+
 ## What This App Does
 
 This is a voice-controlled agent that lets you call your Mac from your phone and control it naturally through speech. Say "open my email" or "find that document from last week" and the agent will navigate your desktop, click through interfaces, and complete tasks—all while you're away from your computer.
