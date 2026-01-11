@@ -26,10 +26,6 @@ Phase 3 TODO:
     - Advanced retry strategies
 """
 
-# Load environment variables FIRST
-from dotenv import load_dotenv
-load_dotenv()
-
 import asyncio
 import re
 import time
@@ -113,165 +109,14 @@ def _generate_immediate_response(prompt: str) -> str:
     return "Working on it"
 
 
-CLASSIFIER_PROMPT = """You are a command routing classifier for Koda, a voice-controlled Mac automation system.
-
-Your task: Analyze each user voice command and output ONLY one of these two words:
-- AppleScript
-- Agent_S3
-
-# Decision Criteria
-
-## Choose "AppleScript" when the command:
-- Opens an application by name (e.g., "open Safari", "launch Mail")
-- Opens a specific URL or website (e.g., "go to YouTube.com", "open Netflix")
-- Performs a Google search (e.g., "search for weather", "Google best restaurants", "search for cats in Safari")
-- Opens a standard folder by name (e.g., "open Downloads", "go to Documents folder", "show Desktop")
-- Does basic Finder operations (e.g., "open a new Finder window")
-- Combines two simple actions (e.g., "Open Safari and go to YouTube")
-- Requires NO visual analysis or UI element interaction
-
-## Choose "Agent_S3" when the command:
-- Clicks specific UI elements (e.g., "click the download button", "press submit")
-- Types into specific input fields (e.g., "enter my email", "type a message")
-- Navigates menus or settings (e.g., "go to settings and enable dark mode")
-- Requires multi-step reasoning (e.g., "find my video file and email it")
-- Involves authentication (e.g., "log into my account")
-- Needs to locate items visually (e.g., "find the red icon", "scroll to the bottom")
-- Performs drag-and-drop or complex gestures
-- Requires finding files by criteria (e.g., "open my most recent download", "find the latest document")
-- Involves composing/sending messages (e.g., "send an email", "compose a message")
-
-# Important Rules
-1. When uncertain whether AppleScript can fully handle the task → choose Agent_S3
-2. If the command is vague or incomplete → choose Agent_S3
-3. Output ONLY the method name, nothing else
-
-# Examples
-
-User: "Open Chrome"
-Output: AppleScript
-
-User: "Search Google for pizza places"
-Output: AppleScript
-
-User: "Search for cats in Safari"
-Output: AppleScript
-
-User: "Go to amazon.com"
-Output: AppleScript
-
-User: "Open Safari and go to YouTube"
-Output: AppleScript
-
-User: "New Finder window"
-Output: AppleScript
-
-User: "Open Mail"
-Output: AppleScript
-
-User: "Open Downloads folder"
-Output: AppleScript
-
-User: "Go to my Documents"
-Output: AppleScript
-
-User: "Show Desktop folder"
-Output: AppleScript
-
-User: "Open Applications"
-Output: AppleScript
-
-User: "Click the buy now button"
-Output: Agent_S3
-
-User: "Find my presentation and share it"
-Output: Agent_S3
-
-User: "Type hello world into the search box"
-Output: Agent_S3
-
-User: "Open settings and change my password"
-Output: Agent_S3
-
-User: "Open my most recent download"
-Output: Agent_S3
-
-User: "Send an email to John"
-Output: Agent_S3
-
-User: "Log into Gmail"
-Output: Agent_S3
-
-Now classify this command:
-User: "{command}"
-Output:"""
-
-
-async def _classify_command_with_llm(prompt: str) -> bool:
-    """
-    Use Claude to classify if a command requires Agent S3.
-    
-    Returns True if Agent S3 is needed, False if AppleScript can handle it.
-    """
-    import os
-    try:
-        import anthropic
-    except ImportError:
-        logger.warning("anthropic package not installed, falling back to Agent S3")
-        return True
-    
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        logger.warning("ANTHROPIC_API_KEY not set, falling back to Agent S3")
-        return True
-    
-    try:
-        client = anthropic.Anthropic(api_key=api_key)
-        
-        # Use Haiku for fast classification (~1-2s)
-        response = client.messages.create(
-            model="claude-3-5-haiku-latest",
-            max_tokens=20,
-            messages=[
-                {"role": "user", "content": CLASSIFIER_PROMPT.format(command=prompt)}
-            ]
-        )
-        
-        result = response.content[0].text.strip().lower()
-        logger.info(f"LLM classifier result: {result} | prompt='{prompt}'")
-        
-        # Return True if Agent S3 needed
-        return "agent_s3" in result
-        
-    except Exception as e:
-        logger.error(f"LLM classification failed: {e}, falling back to Agent S3")
-        return True  # Safe fallback
-
-
-async def _is_complex_command(prompt: str) -> bool:
-    """
-    Use LLM to intelligently classify if command needs Agent S3.
-    
-    Returns True if Agent S3 is needed, False if AppleScript can handle it.
-    """
-    return await _classify_command_with_llm(prompt)
-
-
 async def _execute_command_background(prompt: str, screenshot_after: bool, tool_call_id: str):
     """Execute the desktop command in the background (fire and forget)."""
     try:
         mcp_client = await get_mcp_client()
-        
-        # Use LLM to classify if command needs Agent S3
-        force_agent_s = await _is_complex_command(prompt)
-        if force_agent_s:
-            logger.info(f"LLM classified as complex, forcing Agent S3 | prompt='{prompt}'")
-        
         result = await mcp_client.execute_desktop_command(
             prompt=prompt,
             screenshot_before=False,
-            screenshot_after=screenshot_after,
-            force_agent_s=force_agent_s
+            screenshot_after=screenshot_after
         )
 
         if result.get("status") == "success":

@@ -41,6 +41,8 @@ class Agent:
         self.config = config
         self._agent = None
         self._grounding_agent = None
+        # Window bounds for constraining clicks to target app
+        self._window_bounds = None  # (x, y, width, height) or None for full screen
 
     def initialize(self):
         """Initialize Agent S3."""
@@ -125,7 +127,19 @@ class Agent:
             r'\bsafari\b': 'Safari',
             r'\bchrome\b': 'Google Chrome',
             r'\bfinder\b': 'Finder',
+            r'\bdownloads?\b': 'Finder',  # Downloads folder = Finder
+            r'\bdocuments?\b': 'Finder',  # Documents folder = Finder
+            r'\bdesktop\b': 'Finder',     # Desktop folder = Finder
+            r'\bfolder\b': 'Finder',      # Any folder = Finder
+            r'\bfiles?\b': 'Finder',      # Any file = Finder
+            r'\bsearch\s+for\b': 'Finder', # "Search for X" = Finder (file search)
+            r'\bfind\b': 'Finder',        # "Find X" = Finder
+            r'\bpng\b': 'Finder',         # File extensions
+            r'\bjpg\b': 'Finder',
+            r'\bpdf\b': 'Finder',
+            r'\bvideo\b': 'Finder',
             r'\bmail\b': 'Mail',
+            r'\bemail\b': 'Mail',
             r'\bmessages\b': 'Messages',
             r'\bnotes\b': 'Notes',
             r'\bcalendar\b': 'Calendar',
@@ -145,15 +159,55 @@ class Agent:
 
         if target_app:
             try:
-                applescript = f'tell application "{target_app}" to activate'
+                # Activate the app AND hide all other apps
+                activate_script = f'''
+                tell application "System Events"
+                    -- Hide all other apps
+                    set visible of every process whose visible is true and name is not "{target_app}" to false
+                end tell
+                tell application "{target_app}"
+                    activate
+                end tell
+                '''
                 result = subprocess.run(
-                    ["osascript", "-e", applescript],
+                    ["osascript", "-e", activate_script],
                     capture_output=True,
-                    timeout=3
+                    timeout=5
                 )
                 if result.returncode == 0:
-                    logger.info(f"Focused target app: {target_app}")
+                    logger.info(f"Focused target app: {target_app} (hid other apps)")
                     time.sleep(0.5)
+                    
+                    # Get window bounds to constrain clicks
+                    bounds_script = f'''
+                    tell application "System Events"
+                        tell process "{target_app}"
+                            if exists window 1 then
+                                set winPos to position of window 1
+                                set winSize to size of window 1
+                                return (item 1 of winPos as text) & "," & (item 2 of winPos as text) & "," & (item 1 of winSize as text) & "," & (item 2 of winSize as text)
+                            end if
+                        end tell
+                    end tell
+                    '''
+                    bounds_result = subprocess.run(
+                        ["osascript", "-e", bounds_script],
+                        capture_output=True,
+                        timeout=3
+                    )
+                    logger.debug(f"Bounds script result: rc={bounds_result.returncode}, stdout={bounds_result.stdout}, stderr={bounds_result.stderr}")
+                    if bounds_result.returncode == 0 and bounds_result.stdout:
+                        bounds_str = bounds_result.stdout.decode().strip()
+                        parts = bounds_str.split(",")
+                        if len(parts) == 4:
+                            x, y, w, h = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+                            self._window_bounds = (x, y, w, h)
+                            logger.info(f"Window bounds: x={x}, y={y}, w={w}, h={h}")
+                        else:
+                            logger.warning(f"Could not parse window bounds: {bounds_str}")
+                    else:
+                        logger.warning(f"Window bounds query failed or returned empty")
+                    
                     return target_app
             except Exception as e:
                 logger.warning(f"Error focusing app {target_app}: {e}")
@@ -162,23 +216,44 @@ class Agent:
 
     def _capture_screenshot(self) -> bytes:
         """
-        Capture screenshot for Agent S3, resized to logical resolution.
+        Capture screenshot for Agent S3, cropped to target window and resized.
         
         On Retina displays, screenshots are captured at 2x resolution but
         pyautogui.click() uses logical coordinates. We resize to match.
+        If window bounds are set, we crop to only show the target window.
         """
+        from PIL import Image
+        
         screenshot = pyautogui.screenshot()
         
         # Get logical screen size (what pyautogui.click uses)
         logical_width, logical_height = pyautogui.size()
         
-        # Check if we need to resize (Retina displays have 2x or higher)
+        logger.debug(f"Screenshot captured: {screenshot.width}x{screenshot.height}, logical screen: {logical_width}x{logical_height}")
+        
+        # Calculate Retina scale factor
+        scale_x = screenshot.width / logical_width
+        scale_y = screenshot.height / logical_height
+        
+        # Resize to logical resolution first
         if screenshot.width != logical_width or screenshot.height != logical_height:
-            # Resize screenshot to match logical coordinates
-            from PIL import Image
             original_size = (screenshot.width, screenshot.height)
             screenshot = screenshot.resize((logical_width, logical_height), Image.LANCZOS)
-            logger.debug(f"Resized screenshot from {original_size} to {logical_width}x{logical_height} for Retina scaling")
+            logger.info(f"Resized screenshot from {original_size} to {logical_width}x{logical_height} (Retina: {scale_x}x)")
+        
+        # If we have window bounds, crop to only show that window
+        if self._window_bounds:
+            x, y, w, h = self._window_bounds
+            # Ensure bounds are within screen
+            x = max(0, x)
+            y = max(0, y)
+            right = min(logical_width, x + w)
+            bottom = min(logical_height, y + h)
+            
+            screenshot = screenshot.crop((x, y, right, bottom))
+            logger.info(f"Cropped to window bounds: ({x}, {y}) -> ({right}, {bottom}), size: {right-x}x{bottom-y}")
+        else:
+            logger.warning("No window bounds - sending FULL SCREEN to grounding model (risk of misclicks!)")
         
         buffered = io.BytesIO()
         screenshot.save(buffered, format="PNG")
@@ -198,16 +273,19 @@ class Agent:
         if self._agent is None:
             self.initialize()
         
-        # Reset agent state from previous runs
+        # Reset agent state and window bounds from previous runs
         self._agent.reset()
+        self._window_bounds = None  # Reset - will be set by _focus_target_app if needed
         logger.info(f"Agent S3 executing: {prompt}")
         all_steps_executed = []
 
         try:
-            # Focus target app first
+            # Focus target app first - this also gets window bounds
             focused_app = self._focus_target_app(prompt)
             if focused_app:
                 logger.info(f"Pre-focused app: {focused_app}")
+                if self._window_bounds:
+                    logger.info(f"Constraining clicks to window: {self._window_bounds}")
 
             # Multi-step execution loop
             for step_num in range(max_steps):
@@ -258,11 +336,55 @@ class Agent:
                         result.screenshots = []
                         return result
 
-                    # Execute the action
+                    # Skip wasteful sleep actions
+                    if "time.sleep" in action_code and step_num > 0:
+                        logger.info("Skipping unnecessary sleep action")
+                        # After first step, sleeps are usually just delays - skip them
+                        # and check if we should be done
+                        if len(all_steps_executed) >= 2:
+                            # We've done meaningful work, consider task complete
+                            logger.info("Task appears complete after meaningful actions, returning early")
+                            class Result:
+                                pass
+                            result = Result()
+                            result.success = True
+                            result.error_message = None
+                            result.steps_executed = all_steps_executed
+                            result.screenshots = []
+                            return result
+                        continue
+
+                    # Execute the action, offsetting coordinates if we have window bounds
                     try:
-                        exec(action_code)
+                        adjusted_action = action_code
+                        
+                        # Log original coordinates for debugging
+                        import re
+                        click_match = re.search(r'pyautogui\.click\((\d+),\s*(\d+)', action_code)
+                        if click_match:
+                            orig_x, orig_y = int(click_match.group(1)), int(click_match.group(2))
+                            logger.info(f"Original click coords: ({orig_x}, {orig_y})")
+                        
+                        # If we have window bounds, offset all click coordinates
+                        if self._window_bounds:
+                            offset_x, offset_y = self._window_bounds[0], self._window_bounds[1]
+                            # Find and adjust pyautogui.click(x, y, ...) coordinates
+                            def offset_coords(match):
+                                x = int(match.group(1)) + offset_x
+                                y = int(match.group(2)) + offset_y
+                                logger.info(f"Adjusted click: ({match.group(1)}, {match.group(2)}) -> ({x}, {y})")
+                                return f"pyautogui.click({x}, {y}"
+                            adjusted_action = re.sub(
+                                r'pyautogui\.click\((\d+),\s*(\d+)',
+                                offset_coords,
+                                action_code
+                            )
+                        else:
+                            logger.debug("No window bounds set, using original coordinates")
+                        
+                        exec(adjusted_action)
                         logger.info(f"Action executed successfully")
-                        all_steps_executed.append(action_code)
+                        all_steps_executed.append(adjusted_action)
                         time.sleep(0.5)  # Brief pause after action
                     except Exception as exec_error:
                         logger.error(f"Failed to execute: {exec_error}")

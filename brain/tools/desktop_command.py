@@ -20,11 +20,133 @@ from loguru import logger
 from brain.agent_manager import get_agent_instance, AgentExecutionError
 
 
+async def _decompose_command_with_llm(prompt: str) -> list[dict[str, str]]:
+    """
+    Use LLM to break down a complex command into ordered steps.
+    
+    Each step is classified as either "applescript" (simple) or "agent_s3" (visual).
+    
+    Example: "Find my video and email it to john@email.com"
+    Returns: [
+        {"step": "Open Finder to Downloads folder", "method": "applescript"},
+        {"step": "Search for video files", "method": "agent_s3"},
+        {"step": "Select the most recent video", "method": "agent_s3"},
+        {"step": "Open Mail app", "method": "applescript"},
+        {"step": "Compose email to john@email.com and attach the video", "method": "agent_s3"},
+    ]
+    """
+    import os
+    import json
+    
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set, skipping command decomposition")
+        return []
+    
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        system_prompt = """You are a macOS automation planner. Break down user commands into sequential steps.
+
+For each step, classify it as:
+- "applescript": Simple operations that can be done with AppleScript (opening apps, opening specific folders like Downloads/Documents/Desktop, navigating to URLs)
+- "agent_s3": Complex operations requiring visual analysis (clicking UI elements, searching within apps, typing into fields, reading screen content)
+
+CRITICAL RULES:
+1. "Open Downloads folder" = ONE applescript step (NOT two steps!)
+2. "Open Documents folder" = ONE applescript step
+3. "Open [any folder]" = ONE applescript step  
+4. DON'T split "open folder" into "open Finder" + "navigate to folder"
+5. Searching within Finder = agent_s3
+6. If command is simple (just opening something), return SINGLE step
+
+Return ONLY valid JSON array. No explanation.
+
+Example input: "Open downloads folder"
+Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}]
+
+Example input: "Open Safari"
+Example output: [{"step": "Open Safari", "method": "applescript"}]
+
+Example input: "Open downloads folder and search for my presentation"
+Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}, {"step": "Search for presentation file in Downloads folder", "method": "agent_s3"}]
+
+Example input: "Search for matrix.png in Downloads"
+Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}, {"step": "Search for matrix.png file", "method": "agent_s3"}]
+
+Example input: "Find my video and email it to john@email.com"  
+Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}, {"step": "Search for video files and select the most recent one", "method": "agent_s3"}, {"step": "Open Mail app", "method": "applescript"}, {"step": "Compose email to john@email.com, attach the video, and send", "method": "agent_s3"}]"""
+
+        start_time = datetime.now()
+        response = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=500,
+            messages=[{"role": "user", "content": f"Break down this command: {prompt}"}],
+            system=system_prompt,
+        )
+        
+        generation_time = (datetime.now() - start_time).total_seconds()
+        result_text = response.content[0].text.strip()
+        logger.info(f"Command decomposition took {generation_time:.2f}s")
+        logger.debug(f"Decomposition result: {result_text}")
+        
+        # Parse JSON
+        steps = json.loads(result_text)
+        if isinstance(steps, list) and len(steps) > 0:
+            logger.info(f"Decomposed into {len(steps)} steps: {[s.get('step', '')[:40] for s in steps]}")
+            return steps
+        
+        return []
+        
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse decomposition JSON: {e}")
+        return []
+    except Exception as e:
+        logger.warning(f"Command decomposition failed: {e}")
+        return []
+
+
+def _split_compound_command(prompt: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    DEPRECATED: Use _decompose_command_with_llm instead.
+    Simple regex-based splitting kept as fallback.
+    """
+    import re
+    
+    # Common conjunctions that split compound commands
+    split_patterns = [
+        r'\s+and\s+then\s+',
+        r'\s+then\s+',
+        r'\s+and\s+',
+    ]
+    
+    for pattern in split_patterns:
+        parts = re.split(pattern, prompt, maxsplit=1, flags=re.IGNORECASE)
+        if len(parts) == 2:
+            first_part = parts[0].strip()
+            second_part = parts[1].strip()
+            
+            # Check if first part is a simple "open folder" type command
+            simple_keywords = ['open', 'launch', 'go to', 'navigate']
+            folder_keywords = ['download', 'document', 'desktop', 'folder', 'finder']
+            
+            first_lower = first_part.lower()
+            is_simple_open = any(first_lower.startswith(kw) for kw in simple_keywords)
+            is_folder_operation = any(kw in first_lower for kw in folder_keywords)
+            
+            if is_simple_open and is_folder_operation:
+                logger.info(f"Regex split: '{first_part}' + '{second_part}'")
+                return (first_part, second_part)
+    
+    return (None, None)
+
+
 async def execute_desktop_command(
     prompt: str,
     screenshot_after: bool = True,
     force_agent_s: bool = False,
-    max_agent_steps: int = 7
+    max_agent_steps: int = 10  # Allow more steps for complex multi-part tasks
 ) -> dict[str, Any]:
     """
     Execute a natural language GUI command using Agent-S.
@@ -45,9 +167,62 @@ async def execute_desktop_command(
     logger.info(f"Executing command: {prompt}" + (" [FORCE AGENT-S]" if force_agent_s else ""))
 
     try:
+        # Use LLM to decompose complex commands into steps
+        if not force_agent_s:
+            steps = await _decompose_command_with_llm(prompt)
+            
+            if len(steps) > 1:
+                # Multi-step command - execute each step
+                logger.info(f"Executing {len(steps)} decomposed steps")
+                all_steps_executed = []
+                final_result = None
+                
+                for i, step_info in enumerate(steps):
+                    step_prompt = step_info.get("step", "")
+                    step_method = step_info.get("method", "agent_s3").lower()
+                    
+                    logger.info(f"Step {i+1}/{len(steps)}: [{step_method}] {step_prompt}")
+                    
+                    if step_method == "applescript":
+                        # Execute via AppleScript
+                        result = await _try_applescript_first(step_prompt)
+                        if result and result.get("status") == "success":
+                            all_steps_executed.append(f"[AppleScript] {step_prompt}")
+                            await asyncio.sleep(0.5)  # Brief pause
+                        else:
+                            # AppleScript failed, try Agent S3 as fallback
+                            logger.warning(f"AppleScript failed for step, trying Agent S3")
+                            step_method = "agent_s3"
+                    
+                    if step_method == "agent_s3":
+                        # Execute via Agent S3
+                        agent = await get_agent_instance()
+                        # Give more steps for complex operations
+                        step_max = 5 if i < len(steps) - 1 else max_agent_steps
+                        result = await asyncio.to_thread(agent.run, step_prompt, step_max)
+                        if result.success:
+                            all_steps_executed.append(f"[Agent S3] {step_prompt}")
+                        else:
+                            logger.warning(f"Agent S3 failed on step: {step_prompt}")
+                            # Continue to next step anyway
+                        await asyncio.sleep(0.3)
+                    
+                    final_result = result
+                
+                # Return combined result
+                if screenshot_after:
+                    screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
+                    await asyncio.to_thread(capture_screen_sync, screenshot_path)
+                
+                return {
+                    "status": "success",
+                    "message": f"Completed {len(all_steps_executed)} steps",
+                    "steps_executed": all_steps_executed,
+                    "screenshot_path": screenshot_path if screenshot_after else None,
+                }
+        
+        # Single step or force_agent_s - use original flow
         # For simple "open [app]" commands, use AppleScript directly
-        # This is more reliable than pyautogui which requires accessibility permissions
-        # UNLESS force_agent_s is True
         if not force_agent_s:
             applescript_result = await _try_applescript_first(prompt)
             if applescript_result:
@@ -381,21 +556,33 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
             logger.info(f"Using AppleScript to navigate to: {url}")
             return await _execute_url_applescript(url)
     
-    # Check for search commands first
-    # Patterns: "search for X", "search X in safari", "google X", "look up X"
-    search_patterns = [
-        r"search\s+(?:for\s+)?(.+?)(?:\s+in\s+safari|\s+on\s+google)?$",
-        r"google\s+(.+)$",
-        r"look\s+up\s+(.+)$",
-        r"find\s+(?:information\s+(?:on|about)\s+)?(.+?)(?:\s+online)?$",
+    # Check if this is a LOCAL file/folder search (NOT a web search)
+    # If it mentions Finder, Downloads, Documents, folder, file, etc., skip web search
+    local_search_keywords = [
+        "finder", "downloads", "documents", "desktop", "folder", "file",
+        "directory", "local", "my computer", "my mac", "in the", "within"
     ]
+    is_local_search = any(keyword in prompt_lower for keyword in local_search_keywords)
     
-    for pattern in search_patterns:
-        match = re.search(pattern, prompt_lower)
-        if match:
-            search_query = match.group(1).strip()
-            logger.info(f"Using AppleScript to search for: {search_query}")
-            return await _execute_search_applescript(search_query)
+    # Only do web search if it's NOT a local file/folder search
+    if not is_local_search:
+        # Check for WEB search commands
+        # Patterns: "search for X", "search X in safari", "google X", "look up X"
+        search_patterns = [
+            r"search\s+(?:for\s+)?(.+?)(?:\s+in\s+safari|\s+on\s+google)?$",
+            r"google\s+(.+)$",
+            r"look\s+up\s+(.+)$",
+            r"find\s+(?:information\s+(?:on|about)\s+)?(.+?)(?:\s+online)?$",
+        ]
+        
+        for pattern in search_patterns:
+            match = re.search(pattern, prompt_lower)
+            if match:
+                search_query = match.group(1).strip()
+                logger.info(f"Using AppleScript to search for: {search_query}")
+                return await _execute_search_applescript(search_query)
+    else:
+        logger.info(f"Detected local file/folder search, skipping web search: {prompt}")
     
     # Check if this is a simple "open [app]" command
     # Match patterns like "open safari", "launch chrome", "start finder"
