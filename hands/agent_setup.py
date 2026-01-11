@@ -114,6 +114,67 @@ class Agent:
             logger.exception(f"Failed to initialize Agent S3: {e}")
             raise RuntimeError(f"Agent S3 initialization failed: {e}") from e
 
+    def _focus_app_by_name(self, app_name: str) -> Optional[str]:
+        """
+        Focus an app by its explicit name (provided by the planner).
+        This is the robust approach - no pattern matching, just focus the specified app.
+        """
+        import subprocess
+        
+        if not app_name:
+            return None
+            
+        try:
+            # Activate the app AND hide all other apps
+            activate_script = f'''
+            tell application "System Events"
+                -- Hide all other apps
+                set visible of every process whose visible is true and name is not "{app_name}" to false
+            end tell
+            tell application "{app_name}"
+                activate
+            end tell
+            '''
+            result = subprocess.run(
+                ["osascript", "-e", activate_script],
+                capture_output=True,
+                timeout=5
+            )
+            if result.returncode == 0:
+                logger.info(f"Focused app: {app_name} (hid other apps)")
+                time.sleep(0.5)
+                
+                # Get window bounds
+                bounds_script = f'''
+                tell application "System Events"
+                    tell process "{app_name}"
+                        if exists window 1 then
+                            set winPos to position of window 1
+                            set winSize to size of window 1
+                            return (item 1 of winPos as text) & "," & (item 2 of winPos as text) & "," & (item 1 of winSize as text) & "," & (item 2 of winSize as text)
+                        end if
+                    end tell
+                end tell
+                '''
+                bounds_result = subprocess.run(
+                    ["osascript", "-e", bounds_script],
+                    capture_output=True,
+                    timeout=3
+                )
+                if bounds_result.returncode == 0 and bounds_result.stdout:
+                    bounds_str = bounds_result.stdout.decode().strip()
+                    parts = bounds_str.split(",")
+                    if len(parts) == 4:
+                        x, y, w, h = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
+                        self._window_bounds = (x, y, w, h)
+                        logger.info(f"Window bounds: x={x}, y={y}, w={w}, h={h}")
+                
+                return app_name
+        except Exception as e:
+            logger.warning(f"Error focusing app {app_name}: {e}")
+        
+        return None
+
     def _focus_target_app(self, prompt: str) -> Optional[str]:
         """
         Extract target app from prompt and bring it to focus.
@@ -259,7 +320,7 @@ class Agent:
         screenshot.save(buffered, format="PNG")
         return buffered.getvalue()
 
-    def run(self, prompt: str, max_steps: int = 7) -> Any:
+    def run(self, prompt: str, max_steps: int = 7, focus_app: Optional[str] = None) -> Any:
         """
         Execute a natural language GUI command using Agent S3.
 
@@ -280,8 +341,14 @@ class Agent:
         all_steps_executed = []
 
         try:
-            # Focus target app first - this also gets window bounds
-            focused_app = self._focus_target_app(prompt)
+            # Focus target app - use explicit focus_app if provided, otherwise detect from prompt
+            if focus_app:
+                # Explicit focus app provided by planner
+                focused_app = self._focus_app_by_name(focus_app)
+            else:
+                # Fall back to detecting from prompt (legacy behavior)
+                focused_app = self._focus_target_app(prompt)
+            
             if focused_app:
                 logger.info(f"Pre-focused app: {focused_app}")
                 if self._window_bounds:
@@ -336,22 +403,9 @@ class Agent:
                         result.screenshots = []
                         return result
 
-                    # Skip wasteful sleep actions
-                    if "time.sleep" in action_code and step_num > 0:
-                        logger.info("Skipping unnecessary sleep action")
-                        # After first step, sleeps are usually just delays - skip them
-                        # and check if we should be done
-                        if len(all_steps_executed) >= 2:
-                            # We've done meaningful work, consider task complete
-                            logger.info("Task appears complete after meaningful actions, returning early")
-                            class Result:
-                                pass
-                            result = Result()
-                            result.success = True
-                            result.error_message = None
-                            result.steps_executed = all_steps_executed
-                            result.screenshots = []
-                            return result
+                    # Skip sleep-only actions but continue executing
+                    if action_code.strip().startswith("import time; time.sleep") and "pyautogui" not in action_code:
+                        logger.debug("Skipping sleep-only action, continuing...")
                         continue
 
                     # Execute the action, offsetting coordinates if we have window bounds

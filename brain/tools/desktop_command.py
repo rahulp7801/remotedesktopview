@@ -20,6 +20,193 @@ from loguru import logger
 from brain.agent_manager import get_agent_instance, AgentExecutionError
 
 
+async def _try_simple_applescript(prompt: str) -> Optional[dict[str, Any]]:
+    """
+    Handle ONLY truly simple, single-action commands via AppleScript.
+    
+    This is intentionally limited to avoid over-engineering.
+    Complex multi-step tasks should go to Agent S3 which can observe and adapt.
+    
+    Handles:
+    - "Open Safari" / "Open Chrome" / "Open Mail" etc.
+    - "Go to google.com" / "Open youtube.com"
+    - "Open Downloads folder" / "Open Documents"
+    
+    Does NOT handle:
+    - Anything with "search", "find", "email", "send", "click", etc.
+    - Multi-step commands
+    """
+    import re
+    
+    if sys.platform != "darwin":
+        return None
+    
+    prompt_lower = prompt.lower().strip()
+    
+    # If command contains action words, let Agent S3 handle it
+    action_words = ['search', 'find', 'email', 'send', 'click', 'type', 'compose', 
+                    'attach', 'select', 'drag', 'scroll', 'look for', 'and then', 'then ']
+    if any(word in prompt_lower for word in action_words):
+        logger.debug(f"Command contains action words, delegating to Agent S3: {prompt}")
+        return None
+    
+    # Simple "open [app]" command
+    open_match = re.match(r'^(?:open|launch|start)\s+(.+?)(?:\s+app(?:lication)?)?$', prompt_lower)
+    if open_match:
+        app_or_folder = open_match.group(1).strip()
+        
+        # Check if it's a folder
+        folder_keywords = ['downloads', 'documents', 'desktop', 'folder', 'directory']
+        if any(kw in app_or_folder for kw in folder_keywords):
+            # Use LLM-generated AppleScript for folders
+            return await _generate_and_execute_applescript(prompt)
+        
+        # It's an app - simple activate
+        app_mapping = {
+            'safari': 'Safari', 'chrome': 'Google Chrome', 'firefox': 'Firefox',
+            'mail': 'Mail', 'messages': 'Messages', 'notes': 'Notes',
+            'calendar': 'Calendar', 'finder': 'Finder', 'terminal': 'Terminal',
+            'spotify': 'Spotify', 'slack': 'Slack', 'discord': 'Discord',
+        }
+        actual_app = app_mapping.get(app_or_folder, app_or_folder.title())
+        
+        try:
+            script = f'tell application "{actual_app}" to activate'
+            result = await asyncio.to_thread(
+                subprocess.run, ["osascript", "-e", script],
+                capture_output=True, timeout=5
+            )
+            if result.returncode == 0:
+                return {
+                    "status": "success",
+                    "message": f"Opened {actual_app}",
+                    "steps_executed": [f"AppleScript: open {actual_app}"],
+                    "method": "simple_applescript",
+                }
+        except Exception as e:
+            logger.warning(f"Simple AppleScript failed: {e}")
+        return None
+    
+    # Simple "go to [url]" command
+    url_match = re.match(r'^(?:go to|navigate to|open)\s+(https?://\S+|\S+\.(com|org|net|io|dev|co|app)(?:/\S*)?)$', prompt_lower)
+    if url_match:
+        url = url_match.group(1)
+        if not url.startswith('http'):
+            url = 'https://' + url
+        return await _execute_url_applescript(url)
+    
+    # Not a simple command - let Agent S3 handle it
+    return None
+
+
+async def _analyze_screen_and_plan(prompt: str, screenshot_base64: str) -> list[dict[str, str]]:
+    """
+    Analyze the current screen state and plan only the REMAINING steps needed.
+    
+    This is the key to being truly agentic - we LOOK first, then plan.
+    """
+    import os
+    import json
+    import base64
+    
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set, falling back to blind decomposition")
+        return await _decompose_command_with_llm(prompt)
+    
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        system_prompt = """You are a macOS automation planner with VISION. You can see the current screen.
+
+FIRST, analyze what's currently visible on screen:
+- What app is in focus?
+- What files/windows are visible?
+- What state is the system in?
+
+THEN, determine what steps are NEEDED to complete the user's goal.
+
+For each step, provide:
+- "step": Description of the goal
+- "method": "applescript" (opening apps/folders) or "agent_s3" (visual interaction)
+- "focus_app": Which app should be in focus for this step (e.g., "Finder", "Mail", "Safari", or null if N/A)
+
+IMPORTANT RULES:
+- ONLY return empty array [] if the EXACT goal is VISIBLY complete on screen
+- "Search for X" is NOT complete unless X is visibly highlighted/selected in a search result
+- "Open folder" is NOT complete unless that specific folder is open and visible
+- If unsure, include the steps - it's better to try than to wrongly skip
+- The "focus_app" tells the agent which app window to work in
+
+BE CONSERVATIVE: When in doubt, include the step. Only skip if 100% certain it's done.
+
+Return ONLY valid JSON array. No explanation.
+
+Examples:
+- Screen shows: Finder with Downloads open, confusion_matrix.png visible
+- User says: "Email this to john@email.com"
+- Output: [{"step": "Open Mail app", "method": "applescript", "focus_app": null}, {"step": "Compose email to john@email.com with confusion_matrix.png attached and send", "method": "agent_s3", "focus_app": "Mail"}]
+
+- Screen shows: Mail compose window open with attachment
+- User says: "Send the email"
+- Output: [{"step": "Click send button", "method": "agent_s3", "focus_app": "Mail"}]
+
+- Screen shows: Desktop with no relevant windows
+- User says: "Find my video and email it"
+- Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app": null}, {"step": "Find and select a video file", "method": "agent_s3", "focus_app": "Finder"}, {"step": "Open Mail app", "method": "applescript", "focus_app": null}, {"step": "Compose email with video attached and send", "method": "agent_s3", "focus_app": "Mail"}]"""
+
+        start_time = datetime.now()
+        response = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=500,
+            messages=[{
+                "role": "user", 
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": screenshot_base64,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": f"Current screen is shown above. User wants to: {prompt}\n\nWhat steps are STILL NEEDED? Return JSON array only."
+                    }
+                ]
+            }],
+            system=system_prompt,
+        )
+        
+        generation_time = (datetime.now() - start_time).total_seconds()
+        result_text = response.content[0].text.strip()
+        logger.info(f"Screen analysis + planning took {generation_time:.2f}s")
+        logger.debug(f"Plan based on screen: {result_text}")
+        
+        # Parse JSON
+        steps = json.loads(result_text)
+        if isinstance(steps, list):
+            if len(steps) == 0:
+                logger.warning(f"Screen analysis returned empty array - LLM thinks goal is complete. Raw response: {result_text}")
+                # Be conservative - if LLM returned empty, fall back to blind decomposition
+                logger.info("Falling back to blind decomposition to be safe...")
+                return await _decompose_command_with_llm(prompt)
+            else:
+                logger.info(f"Screen analysis: {len(steps)} steps needed: {[s.get('step', '')[:40] for s in steps]}")
+            return steps
+        
+        return []
+        
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse screen analysis JSON: {e}")
+        return await _decompose_command_with_llm(prompt)
+    except Exception as e:
+        logger.warning(f"Screen analysis failed: {e}, falling back to blind decomposition")
+        return await _decompose_command_with_llm(prompt)
+
+
 async def _decompose_command_with_llm(prompt: str) -> list[dict[str, str]]:
     """
     Use LLM to break down a complex command into ordered steps.
@@ -47,36 +234,33 @@ async def _decompose_command_with_llm(prompt: str) -> list[dict[str, str]]:
         import anthropic
         client = anthropic.Anthropic(api_key=api_key)
         
-        system_prompt = """You are a macOS automation planner. Break down user commands into sequential steps.
+        system_prompt = """You are a macOS automation planner. Break down commands into EXPLICIT, ACTIONABLE steps.
 
-For each step, classify it as:
-- "applescript": Simple operations that can be done with AppleScript (opening apps, opening specific folders like Downloads/Documents/Desktop, navigating to URLs)
-- "agent_s3": Complex operations requiring visual analysis (clicking UI elements, searching within apps, typing into fields, reading screen content)
+For each step, provide:
+- "step": SPECIFIC instructions with HOW to do it (not just what)
+- "method": "applescript" (opening apps/folders/sending emails) or "agent_s3" (visual interaction like finding files)
+- "focus_app": Which app should be focused (e.g., "Finder", "Mail", "Safari", or null)
 
 CRITICAL RULES:
-1. "Open Downloads folder" = ONE applescript step (NOT two steps!)
-2. "Open Documents folder" = ONE applescript step
-3. "Open [any folder]" = ONE applescript step  
-4. DON'T split "open folder" into "open Finder" + "navigate to folder"
-5. Searching within Finder = agent_s3
-6. If command is simple (just opening something), return SINGLE step
+1. For FILE SEARCHES in Finder: Use agent_s3 and say "Click the search bar at the top right, type [filename], then click on the file to select it"
+2. For SENDING EMAIL with attachment: Use APPLESCRIPT (not agent_s3)! Say "Email the selected file to [email]"
+3. "Open [folder]" = ONE applescript step with focus_app: null
+4. Be EXPLICIT about which UI elements to interact with (search bar, etc.)
+5. If command says "the file" or implies a file is already selected, assume it IS visible/selected
 
 Return ONLY valid JSON array. No explanation.
 
-Example input: "Open downloads folder"
-Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}]
+Example: "Open downloads folder"
+Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app": null}]
 
-Example input: "Open Safari"
-Example output: [{"step": "Open Safari", "method": "applescript"}]
+Example: "Search for matrix.png in Downloads"
+Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app": null}, {"step": "Click the search bar at the top right corner, type matrix.png, then click on the file to select it", "method": "agent_s3", "focus_app": "Finder"}]
 
-Example input: "Open downloads folder and search for my presentation"
-Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}, {"step": "Search for presentation file in Downloads folder", "method": "agent_s3"}]
+Example: "Email the file to john@email.com"
+Output: [{"step": "Email the selected file to john@email.com", "method": "applescript", "focus_app": null}]
 
-Example input: "Search for matrix.png in Downloads"
-Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}, {"step": "Search for matrix.png file", "method": "agent_s3"}]
-
-Example input: "Find my video and email it to john@email.com"  
-Example output: [{"step": "Open Downloads folder in Finder", "method": "applescript"}, {"step": "Search for video files and select the most recent one", "method": "agent_s3"}, {"step": "Open Mail app", "method": "applescript"}, {"step": "Compose email to john@email.com, attach the video, and send", "method": "agent_s3"}]"""
+Example: "Find my video and email it to john@email.com"  
+Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app": null}, {"step": "Click the search bar at the top right, type video, click on a video file to select it", "method": "agent_s3", "focus_app": "Finder"}, {"step": "Email the selected file to john@email.com", "method": "applescript", "focus_app": null}]"""
 
         start_time = datetime.now()
         response = client.messages.create(
@@ -167,74 +351,81 @@ async def execute_desktop_command(
     logger.info(f"Executing command: {prompt}" + (" [FORCE AGENT-S]" if force_agent_s else ""))
 
     try:
-        # Use LLM to decompose complex commands into steps
-        if not force_agent_s:
-            steps = await _decompose_command_with_llm(prompt)
-            
-            if len(steps) > 1:
-                # Multi-step command - execute each step
-                logger.info(f"Executing {len(steps)} decomposed steps")
-                all_steps_executed = []
-                final_result = None
-                
-                for i, step_info in enumerate(steps):
-                    step_prompt = step_info.get("step", "")
-                    step_method = step_info.get("method", "agent_s3").lower()
-                    
-                    logger.info(f"Step {i+1}/{len(steps)}: [{step_method}] {step_prompt}")
-                    
-                    if step_method == "applescript":
-                        # Execute via AppleScript
-                        result = await _try_applescript_first(step_prompt)
-                        if result and result.get("status") == "success":
-                            all_steps_executed.append(f"[AppleScript] {step_prompt}")
-                            await asyncio.sleep(0.5)  # Brief pause
-                        else:
-                            # AppleScript failed, try Agent S3 as fallback
-                            logger.warning(f"AppleScript failed for step, trying Agent S3")
-                            step_method = "agent_s3"
-                    
-                    if step_method == "agent_s3":
-                        # Execute via Agent S3
-                        agent = await get_agent_instance()
-                        # Give more steps for complex operations
-                        step_max = 5 if i < len(steps) - 1 else max_agent_steps
-                        result = await asyncio.to_thread(agent.run, step_prompt, step_max)
-                        if result.success:
-                            all_steps_executed.append(f"[Agent S3] {step_prompt}")
-                        else:
-                            logger.warning(f"Agent S3 failed on step: {step_prompt}")
-                            # Continue to next step anyway
-                        await asyncio.sleep(0.3)
-                    
-                    final_result = result
-                
-                # Return combined result
-                if screenshot_after:
-                    screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
-                    await asyncio.to_thread(capture_screen_sync, screenshot_path)
-                
-                return {
-                    "status": "success",
-                    "message": f"Completed {len(all_steps_executed)} steps",
-                    "steps_executed": all_steps_executed,
-                    "screenshot_path": screenshot_path if screenshot_after else None,
-                }
+        # HYBRID APPROACH:
+        # 1. Try AppleScript for truly simple commands (open app, go to URL)
+        # 2. For complex commands: decompose into goals, then execute each agentically
         
-        # Single step or force_agent_s - use original flow
-        # For simple "open [app]" commands, use AppleScript directly
         if not force_agent_s:
-            applescript_result = await _try_applescript_first(prompt)
+            # Only use AppleScript for genuinely simple, single-action commands
+            applescript_result = await _try_simple_applescript(prompt)
             if applescript_result:
-                logger.info(f"Command executed via AppleScript: {applescript_result['message']}")
+                logger.info(f"Simple command executed via AppleScript: {applescript_result['message']}")
                 
-                # Capture verification screenshot if requested
                 if screenshot_after:
                     screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
                     await asyncio.to_thread(capture_screen_sync, screenshot_path)
                     applescript_result["screenshot_path"] = screenshot_path
                 
                 return applescript_result
+            
+            # SIMPLE APPROACH:
+            # 1. Decompose command into logical steps
+            # 2. Agent S3 handles each step agentically (it observes screen each step)
+            # 3. Agent S3 naturally adapts to current screen state
+            
+            steps = await _decompose_command_with_llm(prompt)
+            
+            if len(steps) >= 1:
+                logger.info(f"Decomposed into {len(steps)} goals - executing agentically")
+                all_steps_executed = []
+                agent = await get_agent_instance()
+                
+                for i, step_info in enumerate(steps):
+                    step_goal = step_info.get("step", "")
+                    step_method = step_info.get("method", "agent_s3").lower()
+                    focus_app = step_info.get("focus_app")  # Which app to focus for this step
+                    
+                    logger.info(f"Goal {i+1}/{len(steps)}: [{step_method}] {step_goal}" + 
+                               (f" [focus: {focus_app}]" if focus_app else ""))
+                    
+                    if step_method == "applescript":
+                        # Simple goal - try AppleScript
+                        result = await _try_applescript_first(step_goal)
+                        if result and result.get("status") == "success":
+                            all_steps_executed.append(f"[AppleScript] {step_goal}")
+                            await asyncio.sleep(0.5)
+                            continue
+                        # AppleScript failed, fall through to Agent S3
+                        logger.info(f"AppleScript failed, using Agent S3 for: {step_goal}")
+                    
+                    # Agent S3 executes this goal agentically
+                    # Pass the focus_app so it knows which window to focus
+                    agentic_prompt = f"{step_goal}. (Part of: {prompt})"
+                    
+                    # Pass focus_app to agent.run
+                    result = await asyncio.to_thread(
+                        agent.run, agentic_prompt, max_agent_steps, focus_app
+                    )
+                    if result.success:
+                        all_steps_executed.append(f"[Agent S3] {step_goal}")
+                        logger.info(f"Goal completed: {step_goal}")
+                    else:
+                        logger.warning(f"Goal failed: {step_goal}, continuing to next...")
+                    
+                    await asyncio.sleep(0.3)
+                
+                # Return combined result
+                screenshot_path = None
+                if screenshot_after:
+                    screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
+                    await asyncio.to_thread(capture_screen_sync, screenshot_path)
+                
+                return {
+                    "status": "success",
+                    "message": f"Completed {len(all_steps_executed)} of {len(steps)} goals",
+                    "steps_executed": all_steps_executed,
+                    "screenshot_path": screenshot_path,
+                }
 
         # For complex commands, use Agent-S (limited steps to prevent long runs)
         # Get Agent-S instance
@@ -450,6 +641,60 @@ tell application "Notes"
     make new note
 end tell
 
+User: "Email the selected file to john@email.com"
+tell application "Finder"
+    set theSelection to selection
+    if (count of theSelection) > 0 then
+        set theFile to item 1 of theSelection as alias
+        set fileName to name of theFile
+    else
+        error "No file selected in Finder"
+    end if
+end tell
+tell application "Mail"
+    activate
+    set newMessage to make new outgoing message with properties {{visible:true, subject:"Sharing: " & fileName, content:"Please find the attached file."}}
+    tell newMessage
+        make new to recipient at end of to recipients with properties {{address:"john@email.com"}}
+        make new attachment with properties {{file name:theFile}} at after the last paragraph
+    end tell
+    delay 1
+    send newMessage
+end tell
+delay 1
+tell application "System Events"
+    if exists (button "Send Anyway" of window 1 of process "Mail") then
+        click button "Send Anyway" of window 1 of process "Mail"
+    end if
+end tell
+
+User: "Send email to test@example.com with the file I have selected"
+tell application "Finder"
+    set theSelection to selection
+    if (count of theSelection) > 0 then
+        set theFile to item 1 of theSelection as alias
+        set fileName to name of theFile
+    else
+        error "No file selected"
+    end if
+end tell
+tell application "Mail"
+    activate
+    set newMessage to make new outgoing message with properties {{visible:true, subject:"Sharing: " & fileName, content:"Attached file for you."}}
+    tell newMessage
+        make new to recipient at end of to recipients with properties {{address:"test@example.com"}}
+        make new attachment with properties {{file name:theFile}} at after the last paragraph
+    end tell
+    delay 1
+    send newMessage
+end tell
+delay 1
+tell application "System Events"
+    if exists (button "Send Anyway" of window 1 of process "Mail") then
+        click button "Send Anyway" of window 1 of process "Mail"
+    end if
+end tell
+
 User: "Open Terminal and run a command"
 NEEDS_VISION
 
@@ -457,6 +702,9 @@ User: "Click the submit button"
 NEEDS_VISION
 
 User: "Find my most recent download and open it"
+NEEDS_VISION
+
+User: "Find a specific file by looking at the screen"
 NEEDS_VISION
 
 User: "{prompt}"

@@ -150,8 +150,18 @@ async def handle_execute_desktop_command(
     prompt = tool_call.arguments.get("prompt", "")
     screenshot_after = tool_call.arguments.get("screenshot_after", True)
 
+    # Log the EXACT prompt received from VAPI for debugging
     logger.info(
-        f"Executing desktop command | tool_call_id={tool_call.id} | prompt='{prompt}'"
+        f"==== VAPI COMMAND RECEIVED ===="
+    )
+    logger.info(
+        f"tool_call_id={tool_call.id}"
+    )
+    logger.info(
+        f"EXACT PROMPT: '{prompt}'"
+    )
+    logger.info(
+        f"================================"
     )
 
     if not prompt:
