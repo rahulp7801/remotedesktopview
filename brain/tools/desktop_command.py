@@ -24,7 +24,7 @@ async def execute_desktop_command(
     prompt: str,
     screenshot_after: bool = True,
     force_agent_s: bool = False,
-    max_agent_steps: int = 3
+    max_agent_steps: int = 7
 ) -> dict[str, Any]:
     """
     Execute a natural language GUI command using Agent-S.

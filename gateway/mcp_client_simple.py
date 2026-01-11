@@ -34,8 +34,8 @@ class SimpleMCPClient:
         logger.info(f"Connecting to MCP server at {self._base_url}")
 
         try:
-            # Create HTTP client
-            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=30.0)
+            # Create HTTP client with extended timeout for Agent S3 operations (can take 2+ minutes)
+            self._client = httpx.AsyncClient(base_url=self._base_url, timeout=300.0)
 
             # Test connection with health check
             response = await self._client.get("/health")

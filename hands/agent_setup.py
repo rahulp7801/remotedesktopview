@@ -53,6 +53,10 @@ class Agent:
         if not anthropic_key:
             raise RuntimeError("ANTHROPIC_API_KEY not set")
 
+        # Get actual screen resolution for accurate grounding
+        screen_width, screen_height = pyautogui.size()
+        logger.info(f"Detected screen resolution: {screen_width}x{screen_height}")
+
         # Engine params for main generation (Claude - best reasoning)
         engine_params = {
             "engine_type": "anthropic",
@@ -68,8 +72,8 @@ class Agent:
                 "engine_type": "huggingface",
                 "base_url": hf_ground_url.rstrip("/") + "/v1",
                 "api_key": hf_token,
-                "grounding_width": 1920,
-                "grounding_height": 1080,
+                "grounding_width": screen_width,
+                "grounding_height": screen_height,
             }
         else:
             # Claude Sonnet 4.5 (reliable fallback)
@@ -78,19 +82,19 @@ class Agent:
                 "engine_type": "anthropic",
                 "model": "claude-sonnet-4-5-20250929",
                 "api_key": anthropic_key,
-                "grounding_width": 1920,
-                "grounding_height": 1080,
+                "grounding_width": screen_width,
+                "grounding_height": screen_height,
             }
 
         try:
-            # Create grounding agent
+            # Create grounding agent with actual screen dimensions
             self._grounding_agent = OSWorldACI(
                 env=None,  # No local code execution
                 platform=self.platform,
                 engine_params_for_generation=engine_params,
                 engine_params_for_grounding=engine_params_for_grounding,
-                width=1920,
-                height=1080,
+                width=screen_width,
+                height=screen_height,
             )
             logger.info("OSWorldACI grounding agent created")
 
@@ -157,13 +161,30 @@ class Agent:
         return None
 
     def _capture_screenshot(self) -> bytes:
-        """Capture screenshot for Agent S3."""
+        """
+        Capture screenshot for Agent S3, resized to logical resolution.
+        
+        On Retina displays, screenshots are captured at 2x resolution but
+        pyautogui.click() uses logical coordinates. We resize to match.
+        """
         screenshot = pyautogui.screenshot()
+        
+        # Get logical screen size (what pyautogui.click uses)
+        logical_width, logical_height = pyautogui.size()
+        
+        # Check if we need to resize (Retina displays have 2x or higher)
+        if screenshot.width != logical_width or screenshot.height != logical_height:
+            # Resize screenshot to match logical coordinates
+            from PIL import Image
+            original_size = (screenshot.width, screenshot.height)
+            screenshot = screenshot.resize((logical_width, logical_height), Image.LANCZOS)
+            logger.debug(f"Resized screenshot from {original_size} to {logical_width}x{logical_height} for Retina scaling")
+        
         buffered = io.BytesIO()
         screenshot.save(buffered, format="PNG")
         return buffered.getvalue()
 
-    def run(self, prompt: str, max_steps: int = 5) -> Any:
+    def run(self, prompt: str, max_steps: int = 7) -> Any:
         """
         Execute a natural language GUI command using Agent S3.
 
