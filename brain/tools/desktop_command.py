@@ -23,81 +23,14 @@ from brain.task_state import get_state_manager, TaskStatus
 
 async def _try_simple_applescript(prompt: str) -> Optional[dict[str, Any]]:
     """
-    Handle ONLY truly simple, single-action commands via AppleScript.
-    
-    This is intentionally limited to avoid over-engineering.
-    Complex multi-step tasks should go to Agent S3 which can observe and adapt.
-    
-    Handles:
-    - "Open Safari" / "Open Chrome" / "Open Mail" etc.
-    - "Go to google.com" / "Open youtube.com"
-    - "Open Downloads folder" / "Open Documents"
-    
-    Does NOT handle:
-    - Anything with "search", "find", "email", "send", "click", etc.
-    - Multi-step commands
+    Handle simple commands via the unified AppleScript path.
+    This ensures hardcoded triggers (like Activate Claude Code) work universally.
     """
-    import re
-    
-    if sys.platform != "darwin":
-        return None
-    
-    prompt_lower = prompt.lower().strip()
-    
-    # If command contains action words, let Agent S3 handle it
-    action_words = ['search', 'find', 'email', 'send', 'click', 'type', 'compose', 
-                    'attach', 'select', 'drag', 'scroll', 'look for', 'and then', 'then ']
-    if any(word in prompt_lower for word in action_words):
-        logger.debug(f"Command contains action words, delegating to Agent S3: {prompt}")
-        return None
-    
-    # Simple "open [app]" command
-    open_match = re.match(r'^(?:open|launch|start)\s+(.+?)(?:\s+app(?:lication)?)?$', prompt_lower)
-    if open_match:
-        app_or_folder = open_match.group(1).strip()
-        
-        # Check if it's a folder
-        folder_keywords = ['downloads', 'documents', 'desktop', 'folder', 'directory']
-        if any(kw in app_or_folder for kw in folder_keywords):
-            # Use LLM-generated AppleScript for folders
-            return await _generate_and_execute_applescript(prompt)
-        
-        # It's an app - simple activate
-        app_mapping = {
-            'safari': 'Safari', 'chrome': 'Google Chrome', 'firefox': 'Firefox',
-            'mail': 'Mail', 'messages': 'Messages', 'notes': 'Notes',
-            'calendar': 'Calendar', 'finder': 'Finder', 'terminal': 'Terminal',
-            'spotify': 'Spotify', 'slack': 'Slack', 'discord': 'Discord',
-        }
-        actual_app = app_mapping.get(app_or_folder, app_or_folder.title())
-        
-        try:
-            script = f'tell application "{actual_app}" to activate'
-            result = await asyncio.to_thread(
-                subprocess.run, ["osascript", "-e", script],
-                capture_output=True, timeout=5
-            )
-            if result.returncode == 0:
-                return {
-                    "status": "success",
-                    "message": f"Opened {actual_app}",
-                    "steps_executed": [f"AppleScript: open {actual_app}"],
-                    "method": "simple_applescript",
-                }
-        except Exception as e:
-            logger.warning(f"Simple AppleScript failed: {e}")
-        return None
-    
-    # Simple "go to [url]" command
-    url_match = re.match(r'^(?:go to|navigate to|open)\s+(https?://\S+|\S+\.(com|org|net|io|dev|co|app)(?:/\S*)?)$', prompt_lower)
-    if url_match:
-        url = url_match.group(1)
-        if not url.startswith('http'):
-            url = 'https://' + url
-        return await _execute_url_applescript(url)
-    
-    # Not a simple command - let Agent S3 handle it
-    return None
+    # Delegate to the robust first-pass handler which contains
+    # - Hardcoded triggers (Activate Claude Code)
+    # - URL routing
+    # - Local vs Web search logic
+    return await _try_applescript_first(prompt)
 
 
 async def _capture_screenshot_for_planning() -> str | None:
@@ -1055,9 +988,20 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
     prompt_lower = prompt.lower().strip()
     logger.info(f"Checking AppleScript fast path for: '{prompt_lower}'")
     
-    # HARDCODED: Check for "activate claude code"
-    if "activate claude code" in prompt_lower:
-        logger.info("Triggering hardcoded Activate Claude Code...")
+    # HARDCODED: Check for "activate claude code" and common voice mishearings
+    # "cloud" -> claude
+    # "log code" -> claude code
+    # "clog code" -> claude code
+    trigger_phrases = [
+        "activate claude", 
+        "activate cloud", 
+        "activate log code", 
+        "activate clog",
+        "activate code" # risky but maybe needed? No, too generic.
+    ]
+    
+    if any(phrase in prompt_lower for phrase in trigger_phrases):
+        logger.info(f"Triggering hardcoded Activate Claude Code (matched prompt: '{prompt_lower}')...")
         return await _activate_claude_code_hardcoded()
     
     # Check for "go to [url]" or "navigate to [url]" commands
