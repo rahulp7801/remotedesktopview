@@ -117,6 +117,59 @@ async def execute_desktop_command(
         }
 
 
+async def _execute_search_applescript(search_query: str) -> Optional[dict[str, Any]]:
+    """
+    Execute a search using AppleScript to open Safari with a Google search URL.
+    
+    Args:
+        search_query: What to search for
+        
+    Returns:
+        Success dict if search worked, None otherwise
+    """
+    import urllib.parse
+    
+    try:
+        # URL encode the search query
+        encoded_query = urllib.parse.quote(search_query)
+        search_url = f"https://www.google.com/search?q={encoded_query}"
+        
+        # AppleScript to open Safari with the search URL
+        applescript = f'''
+        tell application "Safari"
+            activate
+            open location "{search_url}"
+        end tell
+        '''
+        
+        start_time = datetime.now()
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["osascript", "-e", applescript],
+            capture_output=True,
+            timeout=10
+        )
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        if result.returncode == 0:
+            logger.info(f"AppleScript search succeeded: searched '{search_query}' in {execution_time:.2f}s")
+            return {
+                "status": "success",
+                "message": f"Searching for {search_query}",
+                "steps_executed": [f"AppleScript: open Safari with Google search for '{search_query}'"],
+                "execution_time_seconds": execution_time,
+                "method": "applescript",
+            }
+        else:
+            stderr = result.stderr.decode() if result.stderr else ""
+            logger.warning(f"AppleScript search failed: {stderr}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"AppleScript search error: {e}")
+        return None
+
+
 async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
     """
     Try AppleScript FIRST for simple commands before using Agent-S.
@@ -130,13 +183,32 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
     Returns:
         Success dict if AppleScript worked, None if command isn't simple enough
     """
+    import re
+    import urllib.parse
+    
     # Only works on macOS
     if sys.platform != "darwin":
         return None
     
-    # Check if this is a simple "open [app]" command
     prompt_lower = prompt.lower().strip()
     
+    # Check for search commands first
+    # Patterns: "search for X", "search X in safari", "google X", "look up X"
+    search_patterns = [
+        r"search\s+(?:for\s+)?(.+?)(?:\s+in\s+safari|\s+on\s+google)?$",
+        r"google\s+(.+)$",
+        r"look\s+up\s+(.+)$",
+        r"find\s+(?:information\s+(?:on|about)\s+)?(.+?)(?:\s+online)?$",
+    ]
+    
+    for pattern in search_patterns:
+        match = re.search(pattern, prompt_lower)
+        if match:
+            search_query = match.group(1).strip()
+            logger.info(f"Using AppleScript to search for: {search_query}")
+            return await _execute_search_applescript(search_query)
+    
+    # Check if this is a simple "open [app]" command
     # Match patterns like "open safari", "launch chrome", "start finder"
     open_patterns = ["open ", "launch ", "start "]
     app_name = None
@@ -195,8 +267,17 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
     actual_app_name = app_name_mapping.get(app_name.lower(), app_name.title())
     
     try:
-        # Use AppleScript to open the application
-        applescript = f'tell application "{actual_app_name}" to activate'
+        # Special handling for Finder - open a new window
+        if actual_app_name == "Finder":
+            applescript = '''
+            tell application "Finder"
+                activate
+                make new Finder window
+            end tell
+            '''
+        else:
+            # Standard activate for other apps
+            applescript = f'tell application "{actual_app_name}" to activate'
         
         start_time = datetime.now()
         result = await asyncio.to_thread(
