@@ -267,43 +267,43 @@ async def api_describe_screen() -> ToolCallResponse:
         )
 
 
-@app.post("/tools/execute_claude_code")
-async def api_execute_claude_code(request: ClaudeCodeRequest) -> ToolCallResponse:
-    """
-    Execute Claude Code CLI with the given instruction.
-
-    This allows users to:
-    - Fix bugs via phone call
-    - Make code changes
-    - Ask questions about the codebase
-    - Run development tasks
-
-    The task runs in the background with progress tracking.
-    Use get_status to check progress.
-    """
-    logger.info(f"Tool call: execute_claude_code | instruction='{request.instruction[:80]}...'")
-
-    try:
-        result = await execute_claude_code(
-            instruction=request.instruction,
-            project=request.project,
-            timeout_seconds=request.timeout_seconds
-        )
-
-        return ToolCallResponse(
-            status=result.get("status", "success"),
-            message=result.get("message"),
-            error=result.get("error"),
-            data=result
-        )
-
-    except Exception as e:
-        logger.exception(f"Claude Code execution error: {e}")
-        return ToolCallResponse(
-            status="error",
-            error=str(e),
-            message="Failed to execute Claude Code"
-        )
+# @app.post("/tools/execute_claude_code")
+# async def api_execute_claude_code(request: ClaudeCodeRequest) -> ToolCallResponse:
+#     """
+#     Execute Claude Code CLI with the given instruction.
+# 
+#     This allows users to:
+#     - Fix bugs via phone call
+#     - Make code changes
+#     - Ask questions about the codebase
+#     - Run development tasks
+# 
+#     The task runs in the background with progress tracking.
+#     Use get_status to check progress.
+#     """
+#     logger.info(f"Tool call: execute_claude_code | instruction='{request.instruction[:80]}...'")
+# 
+#     try:
+#         result = await execute_claude_code(
+#             instruction=request.instruction,
+#             project=request.project,
+#             timeout_seconds=request.timeout_seconds
+#         )
+# 
+#         return ToolCallResponse(
+#             status=result.get("status", "success"),
+#             message=result.get("message"),
+#             error=result.get("error"),
+#             data=result
+#         )
+# 
+#     except Exception as e:
+#         logger.exception(f"Claude Code execution error: {e}")
+#         return ToolCallResponse(
+#             status="error",
+#             error=str(e),
+#             message="Failed to execute Claude Code"
+#         )
 
 
 def main():
