@@ -27,7 +27,6 @@ Phase 3 TODO:
 """
 
 import asyncio
-import re
 import time
 from typing import Any
 
@@ -72,41 +71,6 @@ router = APIRouter(
 # =============================================================================
 # Tool Handlers (MVP Phase 1 - Hardcoded Responses)
 # =============================================================================
-
-
-def _generate_immediate_response(prompt: str) -> str:
-    """
-    Generate an immediate spoken response based on the command prompt.
-
-    This allows us to respond to VAPI quickly while the actual command
-    executes in the background.
-    """
-    prompt_lower = prompt.lower()
-
-    # Extract app name for common patterns
-    app_patterns = [
-        (r"open\s+(\w+)", "Opening {}"),
-        (r"launch\s+(\w+)", "Launching {}"),
-        (r"start\s+(\w+)", "Starting {}"),
-        (r"click\s+(?:on\s+)?(?:the\s+)?(.+)", "Clicking {}"),
-        (r"type\s+(.+)", "Typing the text"),
-        (r"navigate\s+to\s+(.+)", "Navigating to {}"),
-        (r"go\s+to\s+(.+)", "Going to {}"),
-        (r"close\s+(\w+)", "Closing {}"),
-        (r"find\s+(.+)", "Finding {}"),
-        (r"search\s+(?:for\s+)?(.+)", "Searching for {}"),
-    ]
-
-    for pattern, response_template in app_patterns:
-        match = re.search(pattern, prompt_lower)
-        if match:
-            target = match.group(1).strip()
-            # Capitalize first letter for nicer speech
-            target = target.capitalize() if target else target
-            return response_template.format(target)
-
-    # Default response
-    return "Working on it"
 
 
 async def _execute_command_background(prompt: str, screenshot_after: bool, tool_call_id: str):
@@ -171,83 +135,21 @@ async def handle_execute_desktop_command(
             error_message="No prompt provided for desktop command",
         )
 
-    # Generate immediate response for VAPI (avoids timeout)
-    immediate_response = _generate_immediate_response(prompt)
-
     # Fire off the command in the background (don't await)
     asyncio.create_task(
         _execute_command_background(prompt, screenshot_after, tool_call.id)
     )
 
     logger.info(
-        f"Returning immediate response | tool_call_id={tool_call.id} | "
-        f"response='{immediate_response}' | command executing in background"
+        f"Command started in background | tool_call_id={tool_call.id} | prompt='{prompt[:50]}...'"
     )
 
-    # Return immediately so VAPI doesn't timeout
+    # Return empty message - VAPI's LLM already spoke before calling the tool,
+    # so we don't want to cause double-speaking by returning another message.
     return ToolCallResult.success(
         tool_call_id=tool_call.id,
-        message=immediate_response,
+        message="",  # Empty - prevents double-speaking
     )
-
-
-def _generate_hardcoded_response(prompt: str) -> str:
-    """
-    Generate hardcoded response based on prompt pattern matching.
-
-    MVP Phase 1: Simple pattern matching for common commands.
-    TODO Phase 2: Remove this function when MCP integration is complete.
-
-    Args:
-        prompt: The natural language prompt from the user.
-
-    Returns:
-        A hardcoded response string for the given prompt.
-    """
-    prompt_lower = prompt.lower().strip()
-
-    # Pattern: "open [application]"
-    open_match = re.search(r"open\s+(?:the\s+)?([a-zA-Z0-9\s]+?)(?:\s+app(?:lication)?)?$", prompt_lower)
-    if open_match or "open" in prompt_lower:
-        # Extract application name
-        if open_match:
-            app_name = open_match.group(1).strip().title()
-        else:
-            # Fallback: extract words after "open"
-            parts = prompt_lower.split("open", 1)
-            if len(parts) > 1:
-                app_name = parts[1].strip().title()
-            else:
-                app_name = "the application"
-
-        return f"Opening {app_name}. The application should now be visible on your screen."
-
-    # Pattern: "click [element]"
-    if "click" in prompt_lower:
-        return "I've clicked the element you specified. The action has been completed."
-
-    # Pattern: "type [text]" or "enter [text]"
-    if "type" in prompt_lower or "enter" in prompt_lower:
-        return "I've typed the text you specified into the active field."
-
-    # Pattern: "go to [url]" or "navigate to [url]"
-    if "go to" in prompt_lower or "navigate to" in prompt_lower:
-        return "I've navigated to the specified URL. The page should now be loading."
-
-    # Pattern: "scroll [direction]"
-    if "scroll" in prompt_lower:
-        return "I've scrolled the page as requested."
-
-    # Pattern: "close [application/window]"
-    if "close" in prompt_lower:
-        return "I've closed the specified window or application."
-
-    # Pattern: "search [query]"
-    if "search" in prompt_lower:
-        return "I've performed the search you requested."
-
-    # Default response for unrecognized commands
-    return f"I've executed the command: {prompt}. The action has been completed."
 
 
 async def handle_capture_screen(
@@ -367,6 +269,172 @@ async def handle_get_active_applications(
         )
 
 
+async def handle_get_status(
+    tool_call: ToolCall,
+    settings: Settings,
+) -> ToolCallResult:
+    """
+    Handle get_status tool calls - returns REAL status, not guesses.
+
+    This is the key to awareness - VAPI should call this to check:
+    - Is a task currently running?
+    - What's the progress?
+    - What was the result of the last task?
+    """
+    logger.info(f"Get status requested | tool_call_id={tool_call.id}")
+
+    try:
+        mcp_client = await get_mcp_client()
+        result = await mcp_client.get_status()
+
+        if result.get("status") == "success":
+            status_message = result.get("message", "Status retrieved")
+            is_busy = result.get("is_busy", False)
+
+            # Format for TTS based on actual state
+            if is_busy:
+                current_task = result.get("current_task", {})
+                progress = current_task.get("latest_progress", "working")
+                duration = result.get("duration_so_far_seconds", 0)
+                message = f"{progress}. Been working for {int(duration)} seconds."
+            else:
+                message = status_message
+
+            logger.info(f"Status: {message}")
+            return ToolCallResult.success(
+                tool_call_id=tool_call.id,
+                message=message,
+            )
+
+        else:
+            error = result.get("error", "Unknown error")
+            return ToolCallResult.error(
+                tool_call_id=tool_call.id,
+                error_message=f"Couldn't get status: {error}",
+            )
+
+    except Exception as e:
+        logger.exception(f"Get status error: {e}")
+        return ToolCallResult.error(
+            tool_call_id=tool_call.id,
+            error_message="I encountered an error checking the status.",
+        )
+
+
+async def handle_describe_screen(
+    tool_call: ToolCall,
+    settings: Settings,
+) -> ToolCallResult:
+    """
+    Handle describe_screen tool calls - gives the agent "eyes".
+
+    This captures the current screen and uses Claude vision to describe
+    what's visible. VAPI should call this when user asks:
+    - "What's on screen?"
+    - "Is the email sent?"
+    - "Did it work?"
+    """
+    logger.info(f"Describe screen requested | tool_call_id={tool_call.id}")
+
+    try:
+        mcp_client = await get_mcp_client()
+        result = await mcp_client.describe_screen()
+
+        if result.get("status") == "success":
+            description = result.get("message", "Screen captured")
+            active_app = result.get("active_app", "")
+
+            # Format for TTS
+            if active_app:
+                message = f"{active_app} is active. {description}"
+            else:
+                message = description
+
+            logger.info(f"Screen description: {message[:100]}...")
+            return ToolCallResult.success(
+                tool_call_id=tool_call.id,
+                message=message,
+            )
+
+        else:
+            error = result.get("error", "Unknown error")
+            return ToolCallResult.error(
+                tool_call_id=tool_call.id,
+                error_message=f"Couldn't describe screen: {error}",
+            )
+
+    except Exception as e:
+        logger.exception(f"Describe screen error: {e}")
+        return ToolCallResult.error(
+            tool_call_id=tool_call.id,
+            error_message="I encountered an error looking at the screen.",
+        )
+
+
+async def handle_execute_claude_code(
+    tool_call: ToolCall,
+    settings: Settings,
+) -> ToolCallResult:
+    """
+    Handle execute_claude_code tool calls - run Claude Code via phone.
+
+    This enables users to:
+    - Fix bugs in their codebase
+    - Make code changes
+    - Ask questions about code
+    - Run development tasks
+
+    The task runs in background - returns immediately with acknowledgment.
+    Use get_status to check progress.
+    """
+    instruction = tool_call.arguments.get("instruction", "")
+    project = tool_call.arguments.get("project")
+
+    logger.info(
+        f"==== CLAUDE CODE REQUEST ===="
+    )
+    logger.info(f"tool_call_id={tool_call.id}")
+    logger.info(f"instruction: '{instruction[:100]}...'")
+    logger.info(f"project: {project}")
+    logger.info("==============================")
+
+    if not instruction:
+        return ToolCallResult.error(
+            tool_call_id=tool_call.id,
+            error_message="No instruction provided for Claude Code",
+        )
+
+    # Fire off in background (don't await) to avoid VAPI timeout
+    asyncio.create_task(
+        _execute_claude_code_background(instruction, project, tool_call.id)
+    )
+
+    # Return empty message - VAPI's LLM already spoke before calling the tool
+    return ToolCallResult.success(
+        tool_call_id=tool_call.id,
+        message="",  # Empty - prevents double-speaking
+    )
+
+
+async def _execute_claude_code_background(instruction: str, project: str | None, tool_call_id: str):
+    """Execute Claude Code in the background."""
+    try:
+        mcp_client = await get_mcp_client()
+        result = await mcp_client.execute_claude_code(
+            instruction=instruction,
+            project=project,
+            timeout_seconds=300
+        )
+
+        if result.get("status") == "success":
+            logger.info(f"Claude Code succeeded | tool_call_id={tool_call_id}")
+        else:
+            logger.warning(f"Claude Code failed | tool_call_id={tool_call_id} | error={result.get('error')}")
+
+    except Exception as e:
+        logger.error(f"Claude Code background error | tool_call_id={tool_call_id} | error={e}")
+
+
 def handle_unknown_tool(
     tool_call: ToolCall,
     settings: Settings,
@@ -396,6 +464,9 @@ TOOL_HANDLERS = {
     "execute_desktop_command": handle_execute_desktop_command,
     "capture_screen": handle_capture_screen,
     "get_active_applications": handle_get_active_applications,
+    "get_status": handle_get_status,
+    "describe_screen": handle_describe_screen,
+    "execute_claude_code": handle_execute_claude_code,
 }
 
 

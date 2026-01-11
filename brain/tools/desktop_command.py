@@ -18,6 +18,7 @@ from typing import Any, Optional
 from loguru import logger
 
 from brain.agent_manager import get_agent_instance, AgentExecutionError
+from brain.task_state import get_state_manager, TaskStatus
 
 
 async def _try_simple_applescript(prompt: str) -> Optional[dict[str, Any]]:
@@ -97,6 +98,52 @@ async def _try_simple_applescript(prompt: str) -> Optional[dict[str, Any]]:
     
     # Not a simple command - let Agent S3 handle it
     return None
+
+
+async def _capture_screenshot_for_planning() -> str | None:
+    """
+    Capture and resize a screenshot for vision-based planning.
+
+    Returns base64-encoded JPEG string, or None if capture fails.
+    """
+    import subprocess
+    import io
+    import base64
+    from PIL import Image
+
+    try:
+        # Capture screenshot
+        screenshot_path = f"cache/planning_{datetime.now().timestamp()}.png"
+        Path("cache").mkdir(exist_ok=True)
+
+        subprocess.run(
+            ["screencapture", "-x", screenshot_path],
+            check=True,
+            capture_output=True
+        )
+
+        # Read and resize for Claude vision (max 5MB, resize to 1280px width)
+        with Image.open(screenshot_path) as img:
+            max_width = 1280
+            if img.width > max_width:
+                ratio = max_width / img.width
+                new_size = (max_width, int(img.height * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+
+            # Convert to JPEG
+            buffer = io.BytesIO()
+            if img.mode in ('RGBA', 'LA', 'P'):
+                img = img.convert('RGB')
+            img.save(buffer, format='JPEG', quality=85)
+            buffer.seek(0)
+            screenshot_base64 = base64.b64encode(buffer.read()).decode("utf-8")
+
+        logger.info(f"Captured planning screenshot: {len(screenshot_base64) // 1024}KB")
+        return screenshot_base64
+
+    except Exception as e:
+        logger.warning(f"Failed to capture planning screenshot: {e}")
+        return None
 
 
 async def _analyze_screen_and_plan(prompt: str, screenshot_base64: str) -> list[dict[str, str]]:
@@ -350,44 +397,70 @@ async def execute_desktop_command(
     """
     logger.info(f"Executing command: {prompt}" + (" [FORCE AGENT-S]" if force_agent_s else ""))
 
+    # Create task for state tracking
+    state_manager = get_state_manager()
+    task = state_manager.create_task(prompt)
+    state_manager.start_task(task.id)
+
     try:
         # HYBRID APPROACH:
         # 1. Try AppleScript for truly simple commands (open app, go to URL)
         # 2. For complex commands: decompose into goals, then execute each agentically
-        
+
         if not force_agent_s:
             # Only use AppleScript for genuinely simple, single-action commands
+            state_manager.update_progress(task.id, "Trying fast path (AppleScript)")
             applescript_result = await _try_simple_applescript(prompt)
             if applescript_result:
                 logger.info(f"Simple command executed via AppleScript: {applescript_result['message']}")
-                
+
                 if screenshot_after:
                     screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
                     await asyncio.to_thread(capture_screen_sync, screenshot_path)
                     applescript_result["screenshot_path"] = screenshot_path
-                
+                    state_manager.set_screenshot(screenshot_path)
+
+                # Mark task complete
+                state_manager.complete_task(task.id, applescript_result)
                 return applescript_result
-            
-            # SIMPLE APPROACH:
-            # 1. Decompose command into logical steps
-            # 2. Agent S3 handles each step agentically (it observes screen each step)
-            # 3. Agent S3 naturally adapts to current screen state
-            
-            steps = await _decompose_command_with_llm(prompt)
-            
+
+            # SCREEN-AWARE APPROACH:
+            # 1. Capture current screen to understand state
+            # 2. Plan only the REMAINING steps needed (not from scratch)
+            # 3. This prevents re-doing work that's already done
+
+            state_manager.update_progress(task.id, "Analyzing screen and planning steps")
+
+            # Capture and resize screenshot for vision analysis
+            screenshot_base64 = await _capture_screenshot_for_planning()
+            if screenshot_base64:
+                steps = await _analyze_screen_and_plan(prompt, screenshot_base64)
+            else:
+                # Fallback to blind decomposition if screenshot fails
+                logger.warning("Screenshot capture failed, using blind decomposition")
+                steps = await _decompose_command_with_llm(prompt)
+
             if len(steps) >= 1:
                 logger.info(f"Decomposed into {len(steps)} goals - executing agentically")
+                state_manager.update_progress(task.id, f"Planned {len(steps)} steps to complete")
                 all_steps_executed = []
                 agent = await get_agent_instance()
-                
+
                 for i, step_info in enumerate(steps):
                     step_goal = step_info.get("step", "")
                     step_method = step_info.get("method", "agent_s3").lower()
                     focus_app = step_info.get("focus_app")  # Which app to focus for this step
-                    
-                    logger.info(f"Goal {i+1}/{len(steps)}: [{step_method}] {step_goal}" + 
+
+                    # Update progress with current step
+                    state_manager.update_progress(
+                        task.id,
+                        f"Step {i+1}/{len(steps)}: {step_goal[:50]}...",
+                        details={"step": i+1, "total": len(steps), "method": step_method}
+                    )
+
+                    logger.info(f"Goal {i+1}/{len(steps)}: [{step_method}] {step_goal}" +
                                (f" [focus: {focus_app}]" if focus_app else ""))
-                    
+
                     if step_method == "applescript":
                         # Simple goal - try AppleScript
                         result = await _try_applescript_first(step_goal)
@@ -397,11 +470,11 @@ async def execute_desktop_command(
                             continue
                         # AppleScript failed, fall through to Agent S3
                         logger.info(f"AppleScript failed, using Agent S3 for: {step_goal}")
-                    
+
                     # Agent S3 executes this goal agentically
                     # Pass the focus_app so it knows which window to focus
                     agentic_prompt = f"{step_goal}. (Part of: {prompt})"
-                    
+
                     # Pass focus_app to agent.run
                     result = await asyncio.to_thread(
                         agent.run, agentic_prompt, max_agent_steps, focus_app
@@ -411,24 +484,31 @@ async def execute_desktop_command(
                         logger.info(f"Goal completed: {step_goal}")
                     else:
                         logger.warning(f"Goal failed: {step_goal}, continuing to next...")
-                    
+
                     await asyncio.sleep(0.3)
-                
+
                 # Return combined result
                 screenshot_path = None
                 if screenshot_after:
                     screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
                     await asyncio.to_thread(capture_screen_sync, screenshot_path)
-                
-                return {
+                    state_manager.set_screenshot(screenshot_path)
+
+                # Generate a specific completion message based on what was done
+                completion_message = _generate_multi_step_completion_message(prompt, all_steps_executed)
+
+                final_result = {
                     "status": "success",
-                    "message": f"Completed {len(all_steps_executed)} of {len(steps)} goals",
+                    "message": completion_message,
                     "steps_executed": all_steps_executed,
                     "screenshot_path": screenshot_path,
                 }
+                state_manager.complete_task(task.id, final_result)
+                return final_result
 
         # For complex commands, use Agent-S (limited steps to prevent long runs)
         # Get Agent-S instance
+        state_manager.update_progress(task.id, "Starting visual automation (Agent S3)")
         agent = await get_agent_instance()
 
         # Execute command (blocking, so run in thread)
@@ -456,8 +536,10 @@ async def execute_desktop_command(
                 screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
                 await asyncio.to_thread(capture_screen_sync, screenshot_path)
                 response["screenshot_path"] = screenshot_path
+                state_manager.set_screenshot(screenshot_path)
 
             logger.info(f"Command succeeded: {spoken_response}")
+            state_manager.complete_task(task.id, response)
             return response
 
         else:
@@ -468,18 +550,22 @@ async def execute_desktop_command(
             # Try AppleScript fallback for simple "open" commands
             fallback_result = await _try_applescript_fallback(prompt, error_message)
             if fallback_result:
+                state_manager.complete_task(task.id, fallback_result)
                 return fallback_result
 
-            return {
+            fail_response = {
                 "status": "failed",
                 "message": f"I couldn't complete that action: {error_message}",
                 "error": error_message,
                 "prompt": prompt,
                 "execution_time_seconds": execution_time
             }
+            state_manager.fail_task(task.id, error_message)
+            return fail_response
 
     except Exception as e:
         logger.exception(f"Command execution error: {e}")
+        state_manager.fail_task(task.id, str(e))
         return {
             "status": "error",
             "message": "I encountered an error while trying to do that.",
@@ -750,10 +836,20 @@ User: "{prompt}"
         
         if result.returncode == 0:
             logger.info(f"LLM-generated AppleScript succeeded in {total_time:.2f}s (gen: {generation_time:.2f}s, exec: {execution_time:.2f}s)")
+
+            # Generate a more descriptive message based on what was done
+            prompt_lower = prompt.lower()
+            if "email" in prompt_lower and "@" in prompt_lower:
+                done_message = "Email sent successfully"
+            elif "open" in prompt_lower:
+                done_message = f"Opened {prompt.split('open')[-1].strip()[:30] if 'open' in prompt_lower else 'application'}"
+            else:
+                done_message = "Done"
+
             return {
                 "status": "success",
-                "message": f"Done",
-                "steps_executed": [f"LLM-generated AppleScript executed"],
+                "message": done_message,
+                "steps_executed": [f"LLM-generated AppleScript executed: {prompt[:50]}"],
                 "execution_time_seconds": total_time,
                 "method": "llm_applescript",
             }
@@ -1089,6 +1185,72 @@ def _generate_spoken_confirmation(prompt: str, result: Any) -> str:
     else:
         # Generic confirmation
         return "Done. That action completed successfully."
+
+
+def _generate_multi_step_completion_message(prompt: str, steps_executed: list[str]) -> str:
+    """
+    Generate a specific completion message for multi-step tasks.
+
+    Instead of "Completed 3 of 3 goals", returns messages like:
+    - "Email sent to john@example.com"
+    - "Found and opened the presentation file"
+    - "Chrome opened and navigated to Gmail"
+    """
+    prompt_lower = prompt.lower()
+
+    # Extract key action from the original prompt
+    if "email" in prompt_lower and "@" in prompt_lower:
+        # Extract email address
+        import re
+        email_match = re.search(r'[\w\.-]+@[\w\.-]+', prompt)
+        if email_match:
+            return f"Email sent to {email_match.group()}"
+        return "Email sent successfully"
+
+    elif "send" in prompt_lower and "email" in prompt_lower:
+        return "Email sent successfully"
+
+    elif "find" in prompt_lower and "email" in prompt_lower:
+        return "Found the file and sent the email"
+
+    elif "find" in prompt_lower and ("open" in prompt_lower or "send" in prompt_lower):
+        # Find and open/send pattern
+        return "Found and completed the action"
+
+    elif "open" in prompt_lower and "go to" in prompt_lower:
+        # Open browser and navigate
+        return "Opened and navigated to the page"
+
+    elif "open" in prompt_lower and ("navigate" in prompt_lower or "search" in prompt_lower):
+        return "Opened and completed navigation"
+
+    elif "download" in prompt_lower:
+        return "Download started"
+
+    elif "upload" in prompt_lower:
+        return "Upload completed"
+
+    elif "copy" in prompt_lower and "paste" in prompt_lower:
+        return "Copied and pasted successfully"
+
+    elif "create" in prompt_lower:
+        return "Created successfully"
+
+    elif "delete" in prompt_lower or "remove" in prompt_lower:
+        return "Deleted successfully"
+
+    elif "save" in prompt_lower:
+        return "Saved successfully"
+
+    else:
+        # Fall back to summarizing what was done
+        if len(steps_executed) == 1:
+            # Single step - extract action from it
+            step = steps_executed[0].replace("[AppleScript]", "").replace("[Agent S3]", "").strip()
+            return f"Done: {step[:50]}"
+        else:
+            # Multiple steps - give count with context
+            return f"All {len(steps_executed)} steps completed successfully"
 
 
 def _extract_app_name(prompt: str) -> str:

@@ -1,0 +1,127 @@
+{
+  "_comment": "VAPI Assistant Configuration - Import this via VAPI Dashboard or API",
+  "_instructions": "Go to dashboard.vapi.ai > Assistants > Your Assistant > Update with these settings",
+
+  "name": "Koda Desktop Agent",
+
+  "model": {
+    "provider": "anthropic",
+    "model": "claude-3-5-sonnet-20241022",
+    "temperature": 0.3,
+    "systemPrompt": "You are Koda, a voice-controlled desktop automation assistant. You help users control their Mac remotely via phone calls.\n\n## CRITICAL RULES FOR AWARENESS\n\n1. **NEVER GUESS** - When the user asks about status, progress, or what's on screen, you MUST use the appropriate tool:\n   - \"Is it done?\" / \"How's it going?\" / \"What's the status?\" → Use `get_status` tool\n   - \"What's on screen?\" / \"Did it work?\" / \"What do you see?\" → Use `describe_screen` tool\n   - NEVER say \"it's done\" or \"working on it\" without checking first\n\n2. **VERIFY BEFORE CONFIRMING** - After executing a command, if the user asks for confirmation:\n   - Use `describe_screen` to actually look at what happened\n   - Report what you actually see, not what you assume happened\n\n3. **REPORT REAL PROGRESS** - When a task is running:\n   - Use `get_status` to check actual progress\n   - Tell the user the real step being executed\n   - Give honest time estimates based on actual duration\n\n## AVAILABLE TOOLS\n\n1. `execute_desktop_command` - Run any GUI automation task\n   - Use for: opening apps, clicking things, typing, navigating\n   - Returns immediately while task runs in background\n\n2. `get_status` - Check REAL task status\n   - Use for: \"is it done?\", \"how's it going?\", \"what's happening?\"\n   - Returns: actual progress, current step, completion status\n\n3. `describe_screen` - See what's on screen\n   - Use for: \"what's on screen?\", \"did it work?\", verifying results\n   - Returns: AI description of current screen state\n\n4. `capture_screen` - Take a screenshot\n   - Use for: saving visual state for later reference\n\n5. `get_active_applications` - List running apps\n   - Use for: \"what apps are open?\"\n\n6. `execute_claude_code` - Run Claude Code CLI for programming tasks\n   - Use for: fixing bugs, making code changes, asking about code\n   - Ask user which project if not clear\n   - Returns immediately, use get_status to check progress\n\n## CONVERSATION STYLE\n\n- Be concise - this is a phone call\n- Speak naturally, not robotically\n- Acknowledge commands immediately then update with results\n- If something fails, explain what went wrong and suggest alternatives\n- Ask clarifying questions if the command is ambiguous\n\n## EXAMPLES\n\nUser: \"Open Safari\"\nYou: \"Opening Safari.\" [call execute_desktop_command]\n\nUser: \"Is it open yet?\"\nYou: [call describe_screen] \"Yes, Safari is now open and showing your homepage.\"\n\nUser: \"Find my presentation and email it to john@company.com\"\nYou: \"I'll find your presentation and email it to John. This might take a minute.\" [call execute_desktop_command]\n\nUser: \"How's it going?\"\nYou: [call get_status] \"I'm on step 2 of 4 - searching for the file in your Documents folder. Been working for about 15 seconds.\"\n\nUser: \"What do you see on screen?\"\nYou: [call describe_screen] \"I can see Finder is open with your Downloads folder. There's a file called presentation.pdf selected.\"\n\nUser: \"Fix the login bug in the Koda project\"\nYou: \"I'll have Claude Code look at that. Which project should I work in?\" OR if clear: \"Running Claude Code to fix the login bug in Koda. This might take a couple minutes.\" [call execute_claude_code]\n\nUser: \"How's Claude Code doing?\"\nYou: [call get_status] \"Claude Code is still working - it's been about 30 seconds. I'll let you know when it's done.\""
+  },
+
+  "voice": {
+    "provider": "deepgram",
+    "voiceId": "luna"
+  },
+
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "execute_desktop_command",
+        "description": "Execute a natural language GUI command on the Mac desktop. Use this for any action like opening apps, clicking buttons, typing text, navigating files, etc. The command runs in the background - use get_status to check progress.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "Natural language description of what to do. Be specific about UI elements. Examples: 'Open Chrome and go to gmail.com', 'Click the send button', 'Find report.pdf in Downloads'"
+            },
+            "screenshot_after": {
+              "type": "boolean",
+              "description": "Whether to capture a screenshot after the action completes. Default true.",
+              "default": true
+            }
+          },
+          "required": ["prompt"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_status",
+        "description": "Get the REAL current status of the system. ALWAYS use this when the user asks about progress or whether something is done. Returns: whether a task is running, current progress, result of last task. NEVER guess - always call this tool to check.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "describe_screen",
+        "description": "Capture the screen and describe what's visible using AI vision. Use this to 'see' what's on the Mac screen. ALWAYS use this when the user asks what's on screen, whether something worked, or to verify results. Returns a description of the current screen state.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "capture_screen",
+        "description": "Take a screenshot and save it. Use when you need to save the visual state for reference.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "save_path": {
+              "type": "string",
+              "description": "Optional path to save the screenshot. If not provided, saves to cache folder."
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_active_applications",
+        "description": "Get a list of currently running applications on the Mac.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "execute_claude_code",
+        "description": "Execute Claude Code CLI to make code changes, fix bugs, or answer questions about a codebase. Use this when the user wants to do programming tasks like 'fix the login bug' or 'add error handling'. Ask which project if not clear. The task runs in background - use get_status to check progress.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "instruction": {
+              "type": "string",
+              "description": "Natural language instruction for Claude Code. Be specific. Examples: 'Fix the login bug that causes a 500 error', 'Add input validation to the user form', 'How does the authentication system work?'"
+            },
+            "project": {
+              "type": "string",
+              "description": "Optional project name or path. Examples: 'koda', 'remotedesktopview', '~/Projects/myapp'. If not provided, will try to find a matching project."
+            }
+          },
+          "required": ["instruction"]
+        }
+      }
+    }
+  ],
+
+  "serverUrl": "https://YOUR_NGROK_URL/vapi/webhook",
+
+  "serverUrlSecret": "",
+
+  "firstMessage": "Hey, this is Koda. What can I help you with on your Mac?",
+
+  "endCallMessage": "Alright, talk to you later!",
+
+  "transcriber": {
+    "provider": "deepgram",
+    "model": "nova-2",
+    "language": "en"
+  }
+}

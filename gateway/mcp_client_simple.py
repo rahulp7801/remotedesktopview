@@ -176,6 +176,111 @@ class SimpleMCPClient:
                 "error": str(e)
             }
 
+    async def get_status(self) -> Dict[str, Any]:
+        """
+        Get REAL current status - is a task running? What's the progress?
+
+        This is the key tool for awareness - returns actual state, not guesses.
+        """
+        if not self._connected or not self._client:
+            raise RuntimeError("Not connected to MCP server. Call connect() first.")
+
+        logger.info("Calling get_status")
+
+        try:
+            response = await self._client.get("/tools/get_status")
+            response.raise_for_status()
+
+            result = response.json()
+            data = result.get("data", {})
+            data["status"] = result.get("status", "success")
+            data["message"] = result.get("message")
+            data["error"] = result.get("error")
+            return data
+
+        except Exception as e:
+            logger.exception(f"Error calling get_status: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def describe_screen(self) -> Dict[str, Any]:
+        """
+        Capture and describe what's currently on screen.
+
+        This gives the agent "eyes" - uses Claude vision to analyze the screen.
+        """
+        if not self._connected or not self._client:
+            raise RuntimeError("Not connected to MCP server. Call connect() first.")
+
+        logger.info("Calling describe_screen")
+
+        try:
+            response = await self._client.post("/tools/describe_screen", json={})
+            response.raise_for_status()
+
+            result = response.json()
+            data = result.get("data", {})
+            data["status"] = result.get("status", "success")
+            data["message"] = result.get("message")  # The description
+            data["error"] = result.get("error")
+            return data
+
+        except Exception as e:
+            logger.exception(f"Error calling describe_screen: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def execute_claude_code(
+        self,
+        instruction: str,
+        project: Optional[str] = None,
+        timeout_seconds: int = 300
+    ) -> Dict[str, Any]:
+        """
+        Execute Claude Code CLI with the given instruction.
+
+        This allows running Claude Code to fix bugs, make changes, etc.
+        The task runs with progress tracking - use get_status to check.
+
+        Args:
+            instruction: Natural language instruction for Claude Code
+            project: Optional project name or path
+            timeout_seconds: Maximum execution time
+        """
+        if not self._connected or not self._client:
+            raise RuntimeError("Not connected to MCP server. Call connect() first.")
+
+        logger.info(f"Calling execute_claude_code | instruction='{instruction[:50]}...'")
+
+        try:
+            response = await self._client.post(
+                "/tools/execute_claude_code",
+                json={
+                    "instruction": instruction,
+                    "project": project,
+                    "timeout_seconds": timeout_seconds
+                }
+            )
+            response.raise_for_status()
+
+            result = response.json()
+            data = result.get("data", {})
+            data["status"] = result.get("status", "success")
+            data["message"] = result.get("message")
+            data["error"] = result.get("error")
+            return data
+
+        except Exception as e:
+            logger.exception(f"Error calling execute_claude_code: {e}")
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
 
 # Global singleton client
 _mcp_client: Optional[SimpleMCPClient] = None

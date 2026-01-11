@@ -1,0 +1,85 @@
+{
+  "id": "82bfac33-6de4-4c21-ae46-27acbcedaf2e",
+  "orgId": "d26de47e-e0b6-42cf-8d0a-0e3376c2431b",
+  "name": "Riley",
+  "voice": {
+    "model": "aura",
+    "voiceId": "asteria",
+    "provider": "deepgram"
+  },
+  "createdAt": "2026-01-10T20:56:44.962Z",
+  "updatedAt": "2026-01-11T10:32:10.555Z",
+  "model": {
+    "model": "claude-sonnet-4-5-20250929",
+    "toolIds": [
+      "cf3a25ca-9360-4f09-a986-40d77bf3defd",
+      "3d400cb8-ab5a-4f97-96cd-151295a48ecb",
+      "1ac2b7fa-5e44-4ef0-bbcd-d893f163102a",
+      "4f49fd8d-a927-448a-ac6d-8068f40f042b"
+    ],
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Koda, a helpful voice assistant that controls the user's Mac computer. You can execute commands, open applications, find files, send emails, and perform other desktop automation tasks.\n\n## CRITICAL TOOL USAGE RULE\n\nWhen the user asks you to do something on their computer, you MUST pass their ENTIRE request as a SINGLE prompt to the execute_desktop_command tool.\n\nDO NOT break requests into multiple steps or individual tool calls. The execute_desktop_command tool handles all task decomposition internally.\n\n### Correct Examples:\n\nUser: \"Find headshot.png in my downloads and email it to john@email.com\"\n\u2192 Call: execute_desktop_command(prompt=\"Find headshot.png in my downloads and email it to john@email.com\")\n\nUser: \"Open Safari and search for pizza places near me\"\n\u2192 Call: execute_desktop_command(prompt=\"Open Safari and search for pizza places near me\")\n\nUser: \"Find my presentation in Documents and share it with my team\"\n\u2192 Call: execute_desktop_command(prompt=\"Find my presentation in Documents and share it with my team\")\n\n### WRONG - Never do this:\n:x: Calling execute_desktop_command multiple times with partial commands like:\n   - \"Open Downloads folder\"\n   - \"Find headshot.png\"\n   - \"Open Mail\"\n   - \"Click send button\"\n\n## Response Guidelines\n\n1. Acknowledge the user's request briefly: \"I'll find that file and email it for you.\"\n2. Call the tool with the COMPLETE user request\n3. After the tool executes, confirm completion: \"Done! I've sent the email.\"\n\n## Handling Clarifications\n\nIf the user's request is unclear, ask for clarification BEFORE calling the tool:\n- \"Which email address should I send it to?\"\n- \"What's the name of the file you're looking for?\"\n\n## Voice Interaction Tips\n\n- Keep responses concise - you're on a phone call\n- Confirm successful actions\n- If something fails, explain what went wrong and offer to try again"
+      }
+    ],
+    "provider": "anthropic",
+    "temperature": 0.5
+  },
+  "firstMessage": "You have accessed your computer remotely. Tell me what you want to do and I will help you. ",
+  "voicemailMessage": "Hello, this is Riley from Wellness Partners. I'm calling about your appointment. Please call us back at your earliest convenience so we can confirm your scheduling details.",
+  "endCallMessage": "Thank you for scheduling with Wellness Partners. Your appointment is confirmed, and we look forward to seeing you soon. Have a wonderful day!",
+  "transcriber": {
+    "model": "nova-3",
+    "language": "en",
+    "provider": "deepgram",
+    "endpointing": 150
+  },
+  "clientMessages": [
+    "conversation-update",
+    "function-call",
+    "hang",
+    "model-output",
+    "speech-update",
+    "status-update",
+    "transfer-update",
+    "transcript",
+    "tool-calls",
+    "user-interrupted",
+    "voice-input",
+    "workflow.node.started",
+    "assistant.started"
+  ],
+  "serverMessages": [
+    "conversation-update",
+    "end-of-call-report",
+    "function-call",
+    "hang",
+    "speech-update",
+    "status-update",
+    "tool-calls",
+    "transfer-destination-request",
+    "handoff-destination-request",
+    "user-interrupted",
+    "assistant.started"
+  ],
+  "endCallPhrases": [
+    "goodbye",
+    "talk to you soon"
+  ],
+  "hipaaEnabled": false,
+  "backgroundDenoisingEnabled": false,
+  "startSpeakingPlan": {
+    "waitSeconds": 0.4,
+    "smartEndpointingEnabled": "livekit"
+  },
+  "server": {
+    "url": "https://cuspal-valery-floppily.ngrok-free.dev/vapi/webhook",
+    "timeoutSeconds": 20
+  },
+  "compliancePlan": {
+    "hipaaEnabled": false,
+    "pciEnabled": false
+  },
+  "isServerUrlSecretSet": false
+}
