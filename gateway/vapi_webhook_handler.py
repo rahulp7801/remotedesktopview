@@ -296,7 +296,7 @@ async def handle_get_status(
                 current_task = result.get("current_task", {})
                 progress = current_task.get("latest_progress", "working")
                 duration = result.get("duration_so_far_seconds", 0)
-                message = f"{progress}. Been working for {int(duration)} seconds."
+                message = f"I am currently busy. {progress}. I have been working for {int(duration)} seconds."
             else:
                 message = status_message
 

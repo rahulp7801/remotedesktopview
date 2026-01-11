@@ -704,8 +704,9 @@ RULES:
 1. Output ONLY the AppleScript code, nothing else (no markdown, no explanation)
 2. If the task CANNOT be done with AppleScript alone (requires visual analysis, clicking specific UI elements by appearance, or complex multi-step reasoning), output exactly: NEEDS_VISION
 3. Use proper macOS paths (e.g., "Downloads" folder = folder "Downloads" of home)
-4. Keep scripts simple and reliable
-5. Include small delays where needed for UI responsiveness
+4. Use `return` or `log` to output key information (like filenames found, apps opened) so the caller knows what happened.
+5. Keep scripts simple and reliable
+6. Include small delays where needed for UI responsiveness
 
 EXAMPLES:
 
@@ -713,18 +714,27 @@ User: "Open the Downloads folder"
 tell application "Finder"
     activate
     open folder "Downloads" of home
+    return "Opened Downloads folder"
+end tell
+
+User: "What is the first file in Downloads?"
+tell application "Finder"
+    set theFile to item 1 of folder "Downloads" of home
+    return name of theFile
 end tell
 
 User: "Open Documents in Finder"
 tell application "Finder"
     activate
     open folder "Documents" of home
+    return "Opened Documents"
 end tell
 
 User: "Create a new note"
 tell application "Notes"
     activate
     make new note
+    return "Created new note"
 end tell
 
 User: "Email the selected file to john@email.com"
@@ -746,6 +756,7 @@ tell application "Mail"
     end tell
     delay 1
     send newMessage
+    return "Sent email to john@email.com with " & fileName
 end tell
 delay 1
 tell application "System Events"
@@ -773,6 +784,7 @@ tell application "Mail"
     end tell
     delay 1
     send newMessage
+    return "Sent email to test@example.com with " & fileName
 end tell
 delay 1
 tell application "System Events"
@@ -835,7 +847,10 @@ User: "{prompt}"
         total_time = (datetime.now() - start_time).total_seconds()
         
         if result.returncode == 0:
+            stdout_output = result.stdout.decode().strip()
             logger.info(f"LLM-generated AppleScript succeeded in {total_time:.2f}s (gen: {generation_time:.2f}s, exec: {execution_time:.2f}s)")
+            if stdout_output:
+                logger.info(f"AppleScript returned: {stdout_output}")
 
             # Generate a more descriptive message based on what was done
             prompt_lower = prompt.lower()
@@ -846,12 +861,17 @@ User: "{prompt}"
             else:
                 done_message = "Done"
 
+            # Enrich message with actual output if available (fixes hallucination)
+            if stdout_output and len(stdout_output) < 200:
+                done_message += f". Output: {stdout_output}"
+
             return {
                 "status": "success",
                 "message": done_message,
                 "steps_executed": [f"LLM-generated AppleScript executed: {prompt[:50]}"],
                 "execution_time_seconds": total_time,
                 "method": "llm_applescript",
+                "output": stdout_output
             }
         else:
             stderr = result.stderr.decode() if result.stderr else ""
