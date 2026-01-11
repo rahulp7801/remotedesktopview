@@ -921,28 +921,38 @@ async def _monitor_claude_code_prompts(duration_seconds: int = 600):
     logger.info("Claude Code prompt monitor finished")
 
 
-async def _activate_claude_code_hardcoded() -> dict[str, Any]:
+async def _activate_claude_code_hardcoded(argument: str | None = None) -> dict[str, Any]:
     """
     Hardcoded sequence to activate Claude Code in VS Code.
     
     1. Focus VS Code
     2. Open Terminal
-    3. Type 'claude'
+    3. Type 'claude [argument]'
     4. Start background monitor for auto-approval
-    """
-    logger.info("Running hardcoded Activate Claude Code sequence")
     
-    script = '''
+    Args:
+        argument: Optional text to pass to Claude Code (e.g., "debug this code")
+    """
+    logger.info(f"Running hardcoded Activate Claude Code sequence. Argument: {argument}")
+    
+    # Escape quotes if argument is provided
+    cmd_str = "claude"
+    if argument:
+        # Sanitize argument to prevent AppleScript injection
+        safe_arg = argument.replace('"', '\\"').replace('\\', '\\\\')
+        cmd_str = f'claude "{safe_arg}"'
+    
+    script = f'''
     tell application "Visual Studio Code"
         activate
     end tell
     delay 1
     tell application "System Events"
         -- Open terminal (Ctrl + `)
-        keystroke "`" using {control down}
+        keystroke "`" using {{control down}}
         delay 1
-        -- Type claude
-        keystroke "claude"
+        -- Type claude command
+        keystroke "{cmd_str}"
         keystroke return
     end tell
     '''
@@ -956,8 +966,8 @@ async def _activate_claude_code_hardcoded() -> dict[str, Any]:
         
         return {
             "status": "success",
-            "message": "Activated Claude Code and started auto-approval monitor",
-            "steps_executed": ["Focused VS Code", "Opened Terminal", "Ran 'claude'", "Started background monitor"],
+            "message": f"Activated Claude Code with command '{cmd_str}' and started auto-approval monitor",
+            "steps_executed": ["Focused VS Code", "Opened Terminal", f"Ran '{cmd_str}'", "Started background monitor"],
             "method": "hardcoded_macro"
         }
     except Exception as e:
@@ -1000,9 +1010,22 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
         "activate code" # risky but maybe needed? No, too generic.
     ]
     
-    if any(phrase in prompt_lower for phrase in trigger_phrases):
-        logger.info(f"Triggering hardcoded Activate Claude Code (matched prompt: '{prompt_lower}')...")
-        return await _activate_claude_code_hardcoded()
+    for phrase in trigger_phrases:
+        if phrase in prompt_lower:
+            logger.info(f"Triggering hardcoded Activate Claude Code (matched prompt: '{prompt_lower}')...")
+            
+            # Extract argument (everything after the trigger phrase)
+            # Remove "to" if present (e.g. "activate claude code TO debug this")
+            argument = None
+            remainder = prompt_lower.split(phrase, 1)[1].strip()
+            
+            if remainder:
+                if remainder.startswith("to "):
+                    remainder = remainder[3:].strip()
+                if remainder:
+                    argument = remainder
+            
+            return await _activate_claude_code_hardcoded(argument)
     
     # Check for "go to [url]" or "navigate to [url]" commands
     url_patterns = [
