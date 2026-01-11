@@ -47,6 +47,8 @@ class Agent:
         logger.info(f"Initializing Agent S3 for {self.platform}")
 
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        hf_ground_url = os.getenv("HF_GROUND_URL")  # Optional: UI-TARS endpoint
+        hf_token = os.getenv("HF_TOKEN")
         
         if not anthropic_key:
             raise RuntimeError("ANTHROPIC_API_KEY not set")
@@ -58,15 +60,27 @@ class Agent:
             "api_key": anthropic_key,
         }
 
-        # Grounding model - Claude Sonnet 4.5 (same as reasoning model)
-        logger.info("Using Claude Sonnet 4.5 for grounding")
-        engine_params_for_grounding = {
-            "engine_type": "anthropic",
-            "model": "claude-sonnet-4-5-20250929",
-            "api_key": anthropic_key,
-            "grounding_width": 1920,
-            "grounding_height": 1080,
-        }
+        # Grounding model - UI-TARS if available, otherwise Claude
+        if hf_ground_url and hf_token:
+            # UI-TARS on HuggingFace TGI endpoint (faster for grounding)
+            logger.info("Using UI-TARS for grounding (faster)")
+            engine_params_for_grounding = {
+                "engine_type": "huggingface",
+                "base_url": hf_ground_url.rstrip("/") + "/v1",
+                "api_key": hf_token,
+                "grounding_width": 1920,
+                "grounding_height": 1080,
+            }
+        else:
+            # Claude Sonnet 4.5 (reliable fallback)
+            logger.info("Using Claude Sonnet 4.5 for grounding")
+            engine_params_for_grounding = {
+                "engine_type": "anthropic",
+                "model": "claude-sonnet-4-5-20250929",
+                "api_key": anthropic_key,
+                "grounding_width": 1920,
+                "grounding_height": 1080,
+            }
 
         try:
             # Create grounding agent
