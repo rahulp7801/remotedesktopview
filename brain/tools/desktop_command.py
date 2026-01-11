@@ -22,7 +22,9 @@ from brain.agent_manager import get_agent_instance, AgentExecutionError
 
 async def execute_desktop_command(
     prompt: str,
-    screenshot_after: bool = True
+    screenshot_after: bool = True,
+    force_agent_s: bool = False,
+    max_agent_steps: int = 3
 ) -> dict[str, Any]:
     """
     Execute a natural language GUI command using Agent-S.
@@ -30,6 +32,7 @@ async def execute_desktop_command(
     Args:
         prompt: Natural language description of the action
         screenshot_after: Capture screenshot after execution
+        force_agent_s: If True, skip AppleScript fast path and use Agent-S only
 
     Returns:
         Dictionary with:
@@ -39,30 +42,33 @@ async def execute_desktop_command(
         - screenshot_path: Optional path to verification screenshot
         - error: Optional error message if failed
     """
-    logger.info(f"Executing command: {prompt}")
+    logger.info(f"Executing command: {prompt}" + (" [FORCE AGENT-S]" if force_agent_s else ""))
 
     try:
         # For simple "open [app]" commands, use AppleScript directly
         # This is more reliable than pyautogui which requires accessibility permissions
-        applescript_result = await _try_applescript_first(prompt)
-        if applescript_result:
-            logger.info(f"Command executed via AppleScript: {applescript_result['message']}")
-            
-            # Capture verification screenshot if requested
-            if screenshot_after:
-                screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
-                await asyncio.to_thread(capture_screen_sync, screenshot_path)
-                applescript_result["screenshot_path"] = screenshot_path
-            
-            return applescript_result
+        # UNLESS force_agent_s is True
+        if not force_agent_s:
+            applescript_result = await _try_applescript_first(prompt)
+            if applescript_result:
+                logger.info(f"Command executed via AppleScript: {applescript_result['message']}")
+                
+                # Capture verification screenshot if requested
+                if screenshot_after:
+                    screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
+                    await asyncio.to_thread(capture_screen_sync, screenshot_path)
+                    applescript_result["screenshot_path"] = screenshot_path
+                
+                return applescript_result
 
-        # For complex commands, use Agent-S
+        # For complex commands, use Agent-S (limited steps to prevent long runs)
         # Get Agent-S instance
         agent = await get_agent_instance()
 
         # Execute command (blocking, so run in thread)
+        # Limit steps to prevent 4+ minute runs
         start_time = datetime.now()
-        result = await asyncio.to_thread(agent.run, prompt)
+        result = await asyncio.to_thread(agent.run, prompt, max_agent_steps)
         execution_time = (datetime.now() - start_time).total_seconds()
 
         logger.info(f"Command execution took {execution_time:.2f}s")
@@ -115,6 +121,46 @@ async def execute_desktop_command(
             "error_type": type(e).__name__,
             "prompt": prompt
         }
+
+
+async def _execute_url_applescript(url: str) -> Optional[dict[str, Any]]:
+    """
+    Navigate to a URL using AppleScript.
+    """
+    try:
+        applescript = f'''
+        tell application "Safari"
+            activate
+            open location "{url}"
+        end tell
+        '''
+        
+        start_time = datetime.now()
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["osascript", "-e", applescript],
+            capture_output=True,
+            timeout=10
+        )
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        if result.returncode == 0:
+            logger.info(f"AppleScript URL navigation succeeded: {url} in {execution_time:.2f}s")
+            return {
+                "status": "success",
+                "message": f"Opening {url}",
+                "steps_executed": [f"AppleScript: open Safari to {url}"],
+                "execution_time_seconds": execution_time,
+                "method": "applescript",
+            }
+        else:
+            stderr = result.stderr.decode() if result.stderr else ""
+            logger.warning(f"AppleScript URL navigation failed: {stderr}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"AppleScript URL error: {e}")
+        return None
 
 
 async def _execute_search_applescript(search_query: str) -> Optional[dict[str, Any]]:
@@ -191,6 +237,21 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
         return None
     
     prompt_lower = prompt.lower().strip()
+    
+    # Check for "go to [url]" or "navigate to [url]" commands
+    url_patterns = [
+        r"(?:go to|navigate to|open|visit)\s+(?:the\s+)?(?:website\s+)?(?:https?://)?([a-zA-Z0-9][-a-zA-Z0-9]*(?:\.[a-zA-Z0-9][-a-zA-Z0-9]*)+(?:/\S*)?)",
+        r"(?:go to|navigate to|open)\s+([a-zA-Z0-9]+\.(?:com|org|net|io|dev|co|app|ai)(?:/\S*)?)",
+    ]
+    
+    for pattern in url_patterns:
+        match = re.search(pattern, prompt_lower)
+        if match:
+            url = match.group(1).strip()
+            if not url.startswith("http"):
+                url = "https://" + url
+            logger.info(f"Using AppleScript to navigate to: {url}")
+            return await _execute_url_applescript(url)
     
     # Check for search commands first
     # Patterns: "search for X", "search X in safari", "google X", "look up X"

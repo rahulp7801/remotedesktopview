@@ -1,425 +1,293 @@
 """
-Agent-S Platform Abstraction
+Agent S3 Platform Abstraction
 
-Provides unified interface for creating Agent-S instances across:
-- macOS (MacOSACI driver)
-- Windows (WindowsACI driver)
-
-Platform-specific drivers handle OS-level GUI automation APIs.
+Uses the latest Agent S3 (gui-agents 0.3.1) for GUI automation.
+Agent S3 uses screenshot-based visual grounding instead of accessibility tree,
+resulting in much better accuracy and more reliable multi-step execution.
 """
 
 import sys
+import os
+import io
+import time
 from typing import Optional, Any
 
 from loguru import logger
+import pyautogui
 
-# Import Agent-S from gui-agents package
+# Try to import Agent S3 (newer, better)
 try:
-    from gui_agents.core.AgentS import GraphSearchAgent as RealAgent
-    logger.info("Using real gui-agents GraphSearchAgent")
-    USE_REAL_AGENT = True
+    from gui_agents.s3.agents.agent_s import AgentS3
+    from gui_agents.s3.agents.grounding import OSWorldACI
+    logger.info("Using Agent S3 (gui-agents 0.3.1)")
+    USE_AGENT_S3 = True
 except ImportError as e:
-    logger.warning(f"gui-agents GraphSearchAgent not available: {e}")
-    logger.info("Using MockAgent fallback")
-    from hands.mock_agent import MockAgent as RealAgent
-    USE_REAL_AGENT = False
-
-# Import platform-specific drivers
-from hands.drivers.macos_driver import MacOSDriver
-from hands.drivers.windows_driver import WindowsDriver
+    logger.warning(f"Agent S3 not available: {e}, falling back to old GraphSearchAgent")
+    USE_AGENT_S3 = False
+    try:
+        from gui_agents.core.AgentS import GraphSearchAgent
+    except ImportError:
+        GraphSearchAgent = None
 
 
 class Agent:
     """
-    Wrapper for gui-agents Agent with platform abstraction.
-
-    This provides a consistent interface regardless of platform.
+    Wrapper for Agent S3 with platform abstraction.
+    Uses screenshot-based visual grounding for better accuracy.
     """
 
-    def __init__(self, platform: str, driver: Any, config: dict):
+    def __init__(self, platform: str, config: dict):
         self.platform = platform
-        self.driver = driver
         self.config = config
         self._agent = None
-        self._grounding_agent = None  # Store reference for action execution
+        self._grounding_agent = None
 
     def initialize(self):
-        """Initialize the underlying Agent-S instance."""
-        import os
-        logger.info(f"Initializing Agent with {self.platform} driver")
+        """Initialize Agent S3."""
+        logger.info(f"Initializing Agent S3 for {self.platform}")
+
+        anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        
+        if not anthropic_key:
+            raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+        # Engine params for main generation (Claude - best reasoning)
+        engine_params = {
+            "engine_type": "anthropic",
+            "model": "claude-sonnet-4-5-20250929",
+            "api_key": anthropic_key,
+        }
+
+        # Grounding model - Claude Sonnet 4.5 (same as reasoning model)
+        logger.info("Using Claude Sonnet 4.5 for grounding")
+        engine_params_for_grounding = {
+            "engine_type": "anthropic",
+            "model": "claude-sonnet-4-5-20250929",
+            "api_key": anthropic_key,
+            "grounding_width": 1920,
+            "grounding_height": 1080,
+        }
 
         try:
-            # Create Agent instance (real or mock depending on what's available)
-            if USE_REAL_AGENT:
-                # Use real gui-agents UIAgent
-                from gui_agents.aci.MacOSACI import MacOSACI
-                from gui_agents.aci.WindowsOSACI import WindowsACI as WindowsOSACI
+            # Create grounding agent
+            self._grounding_agent = OSWorldACI(
+                env=None,  # No local code execution
+                platform=self.platform,
+                engine_params_for_generation=engine_params,
+                engine_params_for_grounding=engine_params_for_grounding,
+                width=1920,
+                height=1080,
+            )
+            logger.info("OSWorldACI grounding agent created")
 
-                # Create ACI driver instance
-                if self.platform == "macos":
-                    self._grounding_agent = MacOSACI(top_app_only=True, ocr=False)
-                elif self.platform == "windows":
-                    self._grounding_agent = WindowsOSACI(top_app_only=True, ocr=False)
-                else:
-                    raise ValueError(f"Unsupported platform: {self.platform}")
-                
-                grounding_agent = self._grounding_agent
-
-                # Get Anthropic API key from environment
-                anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
-                if not anthropic_api_key:
-                    logger.warning("ANTHROPIC_API_KEY not set - GraphSearchAgent requires API key. Falling back to MockAgent.")
-                    # Fall back to MockAgent if no API key
-                    from hands.mock_agent import MockAgent
-                    self._agent = MockAgent(platform=self.platform, **self.config)
-                    logger.info("Falling back to MockAgent due to missing Anthropic API key")
-                    return
-
-                # Engine parameters for LLM (using Anthropic Claude)
-                engine_params = {
-                    "engine_type": "anthropic",  # Supports: "openai", "azure", "anthropic", "vllm"
-                    "model": "claude-sonnet-4-5-20250929",  # Claude Sonnet 4.5
-                    "max_tokens": 2000,
-                    "temperature": 0.1,
-                    "api_key": anthropic_api_key,
-                }
-
-                # Initialize GraphSearchAgent
-                self._agent = RealAgent(
-                    engine_params=engine_params,
-                    grounding_agent=grounding_agent,
-                    platform=self.platform,
-                    action_space="aci",  # Use ACI for GUI control
-                    observation_type="a11y_tree",  # Accessibility tree observations
-                )
-                logger.info("Real GraphSearchAgent initialized successfully")
-            else:
-                # Use MockAgent for testing
-                self._agent = RealAgent(
-                    platform=self.platform,
-                    **self.config
-                )
-                logger.info("MockAgent initialized successfully")
+            # Create Agent S3
+            self._agent = AgentS3(
+                engine_params,
+                self._grounding_agent,
+                platform=self.platform,
+                max_trajectory_length=self.config.get("max_trajectory_length", 5),
+                enable_reflection=self.config.get("enable_reflection", False),
+            )
+            logger.info("Agent S3 initialized successfully")
 
         except Exception as e:
-            logger.exception(f"Failed to initialize Agent: {e}")
-            raise RuntimeError(f"Agent initialization failed: {e}") from e
+            logger.exception(f"Failed to initialize Agent S3: {e}")
+            raise RuntimeError(f"Agent S3 initialization failed: {e}") from e
 
-    def _capture_screenshot_bytes(self) -> Optional[bytes]:
+    def _focus_target_app(self, prompt: str) -> Optional[str]:
         """
-        Capture the current screen as bytes for Agent-S observation.
-
-        Returns:
-            Screenshot as bytes, or None if capture fails
+        Extract target app from prompt and bring it to focus.
         """
         import subprocess
-        import tempfile
-        import os
+        import re
 
-        try:
-            # Create a temporary file for the screenshot
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-                tmp_path = tmp_file.name
+        prompt_lower = prompt.lower()
 
-            # Capture screenshot using macOS screencapture
-            result = subprocess.run(
-                ["screencapture", "-x", tmp_path],  # -x: no sound
-                capture_output=True,
-                timeout=5
-            )
+        app_patterns = {
+            r'\bsafari\b': 'Safari',
+            r'\bchrome\b': 'Google Chrome',
+            r'\bfinder\b': 'Finder',
+            r'\bmail\b': 'Mail',
+            r'\bmessages\b': 'Messages',
+            r'\bnotes\b': 'Notes',
+            r'\bcalendar\b': 'Calendar',
+            r'\bterminal\b': 'Terminal',
+            r'\bvscode\b': 'Visual Studio Code',
+            r'\bcursor\b': 'Cursor',
+            r'\bslack\b': 'Slack',
+            r'\bdiscord\b': 'Discord',
+            r'\bspotify\b': 'Spotify',
+        }
 
-            if result.returncode != 0:
-                logger.warning(f"Screenshot capture failed: {result.stderr.decode()}")
-                return None
+        target_app = None
+        for pattern, app_name in app_patterns.items():
+            if re.search(pattern, prompt_lower):
+                target_app = app_name
+                break
 
-            # Read the screenshot bytes
-            with open(tmp_path, 'rb') as f:
-                screenshot_bytes = f.read()
+        if target_app:
+            try:
+                applescript = f'tell application "{target_app}" to activate'
+                result = subprocess.run(
+                    ["osascript", "-e", applescript],
+                    capture_output=True,
+                    timeout=3
+                )
+                if result.returncode == 0:
+                    logger.info(f"Focused target app: {target_app}")
+                    time.sleep(0.5)
+                    return target_app
+            except Exception as e:
+                logger.warning(f"Error focusing app {target_app}: {e}")
 
-            # Clean up temp file
-            os.unlink(tmp_path)
+        return None
 
-            logger.debug(f"Screenshot captured: {len(screenshot_bytes)} bytes")
-            return screenshot_bytes
+    def _capture_screenshot(self) -> bytes:
+        """Capture screenshot for Agent S3."""
+        screenshot = pyautogui.screenshot()
+        buffered = io.BytesIO()
+        screenshot.save(buffered, format="PNG")
+        return buffered.getvalue()
 
-        except Exception as e:
-            logger.warning(f"Failed to capture screenshot: {e}")
-            return None
-
-    def run(self, prompt: str) -> Any:
+    def run(self, prompt: str, max_steps: int = 5) -> Any:
         """
-        Execute a natural language GUI command.
+        Execute a natural language GUI command using Agent S3.
 
         Args:
             prompt: Natural language description of the action
+            max_steps: Maximum number of actions to execute
 
         Returns:
-            Result object with:
-            - success: bool
-            - error_message: Optional[str]
-            - steps_executed: Optional[List[str]]
-            - screenshots: Optional[List[str]]
+            Result object with success, error_message, steps_executed
         """
         if self._agent is None:
             self.initialize()
-
-        logger.debug(f"Agent-S executing: {prompt}")
+        
+        # Reset agent state from previous runs
+        self._agent.reset()
+        logger.info(f"Agent S3 executing: {prompt}")
+        all_steps_executed = []
 
         try:
-            if USE_REAL_AGENT:
-                # GraphSearchAgent uses predict() method with observation dict
-                # Need to capture current accessibility tree and screenshot before calling predict
+            # Focus target app first
+            focused_app = self._focus_target_app(prompt)
+            if focused_app:
+                logger.info(f"Pre-focused app: {focused_app}")
+
+            # Multi-step execution loop
+            for step_num in range(max_steps):
+                logger.info(f"=== Step {step_num + 1}/{max_steps} ===")
+
+                # Capture fresh screenshot
+                screenshot_bytes = self._capture_screenshot()
+                obs = {"screenshot": screenshot_bytes}
+
+                # Get prediction from Agent S3
+                start_time = time.time()
                 try:
-                    # Get system-wide accessibility element using macOS APIs
-                    from ApplicationServices import AXUIElementCreateSystemWide
-
-                    # Create system-wide accessibility element
-                    ax_system = AXUIElementCreateSystemWide()
-
-                    # Capture screenshot as bytes for the observation
-                    screenshot_bytes = self._capture_screenshot_bytes()
-
-                    # Create observation dict with correct keys expected by GraphSearchAgent
-                    # The UIElement wrapper is created internally by MacOSACI
-                    from gui_agents.aci.MacOSACI import UIElement
-                    observation = {
-                        "accessibility_tree": UIElement(ax_system),
-                        "screenshot": screenshot_bytes
-                    }
-                    logger.debug("Successfully captured accessibility tree and screenshot")
+                    info, action = self._agent.predict(
+                        instruction=prompt,
+                        observation=obs
+                    )
+                    elapsed = time.time() - start_time
+                    logger.info(f"Prediction took {elapsed:.2f}s")
                 except Exception as e:
-                    logger.warning(f"Could not get screen state: {e}. Using fallback observation.")
-                    # Fallback: create minimal observation that might still work
-                    try:
-                        from ApplicationServices import AXUIElementCreateSystemWide
-                        from gui_agents.aci.MacOSACI import UIElement
-                        ax_system = AXUIElementCreateSystemWide()
-                        observation = {
-                            "accessibility_tree": UIElement(ax_system),
-                            "screenshot": None
-                        }
-                    except Exception as e2:
-                        logger.error(f"Fallback observation also failed: {e2}")
-                        raise RuntimeError(f"Cannot create observation for Agent-S: {e2}")
+                    logger.error(f"Agent S3 prediction error: {e}")
+                    break
 
-                try:
-                    info, actions = self._agent.predict(prompt, observation)
-                except IndexError as e:
-                    # This occurs when the LLM planner returns an empty subtask list
-                    # and the agent tries to pop from it (subtasks.pop(0))
-                    logger.warning(f"Agent-S planner returned empty subtask list for: {prompt}")
-                    
-                    class PlannerFailureResult:
-                        success = False
-                        error_message = (
-                            f"Could not plan steps for this command. "
-                            f"Try a simpler, more specific instruction like 'Open Safari' "
-                            f"instead of '{prompt}'"
-                        )
-                        steps_executed = []
-                        screenshots = []
-                    
-                    return PlannerFailureResult()
+                if action and len(action) > 0:
+                    action_code = action[0]
+                    logger.info(f"Action: {action_code[:100]}...")
 
-                # Check if the agent returned DONE or FAIL
-                if actions and len(actions) > 0:
-                    action_str = actions[0].lower() if actions[0] else ""
-                    
-                    if "done" in action_str or "fail" in action_str:
-                        logger.info(f"Agent-S completed with: {action_str}")
-                        
-                        class UIAgentResult:
-                            success = "done" in action_str
-                            error_message = None if "done" in action_str else "Agent reported failure"
-                            steps_executed = [action_str]
-                            screenshots = []
-                        
-                        return UIAgentResult()
-                    
-                    # Actually execute the action using the grounding agent
-                    # The action can be either:
-                    # - pyautogui code: "import pyautogui; pyautogui.click(100, 200)"
-                    # - ACI method: "click(5)" or "open('Safari')"
-                    logger.info(f"Executing action: {actions[0]}")
-                    
+                    # Check for DONE/FAIL (can be "DONE", "done()", etc.)
+                    action_lower = str(action_code).lower().strip()
+                    if action_lower in ("done", "done()", "\"done\"", "'done'") or "done()" in action_lower:
+                        logger.info("Agent S3 completed with DONE")
+                        class Result:
+                            pass
+                        result = Result()
+                        result.success = True
+                        result.error_message = None
+                        result.steps_executed = all_steps_executed
+                        result.screenshots = []
+                        return result
+
+                    if action_lower in ("fail", "fail()", "\"fail\"", "'fail'") or "fail()" in action_lower:
+                        logger.info("Agent S3 reported FAIL")
+                        class Result:
+                            pass
+                        result = Result()
+                        result.success = False
+                        result.error_message = "Agent reported failure"
+                        result.steps_executed = all_steps_executed
+                        result.screenshots = []
+                        return result
+
+                    # Execute the action
                     try:
-                        import time
-                        import pyautogui
-                        time.sleep(0.5)  # Small delay before action
-                        
-                        # Execute the action - include both pyautogui and ACI methods
-                        # The agent may generate either style depending on action_space config
-                        exec_globals = {
-                            "__builtins__": __builtins__,
-                            "pyautogui": pyautogui,
-                            "time": time,
-                        }
-                        exec_locals = {
-                            # ACI methods from grounding agent
-                            "open": self._grounding_agent.open,
-                            "click": self._grounding_agent.click,
-                            "type": self._grounding_agent.type,
-                            "scroll": self._grounding_agent.scroll,
-                            "hotkey": self._grounding_agent.hotkey,
-                            "wait": self._grounding_agent.wait,
-                            "done": self._grounding_agent.done,
-                            "fail": self._grounding_agent.fail,
-                            "switch_applications": self._grounding_agent.switch_applications,
-                            "hold_and_press": self._grounding_agent.hold_and_press,
-                            "drag_and_drop": self._grounding_agent.drag_and_drop,
-                        }
-                        
-                        exec(actions[0], exec_globals, exec_locals)
-                        
-                        time.sleep(0.5)  # Small delay after action
-                        logger.info(f"Action executed successfully: {actions[0]}")
-                        
+                        exec(action_code)
+                        logger.info(f"Action executed successfully")
+                        all_steps_executed.append(action_code)
+                        time.sleep(0.5)  # Brief pause after action
                     except Exception as exec_error:
-                        logger.error(f"Failed to execute action '{actions[0]}': {exec_error}")
-                        
-                        class ExecFailureResult:
-                            success = False
-                            error_message = f"Failed to execute: {exec_error}"
-                            steps_executed = [actions[0]]
-                            screenshots = []
-                        
-                        return ExecFailureResult()
+                        logger.error(f"Failed to execute: {exec_error}")
+                        class Result:
+                            pass
+                        result = Result()
+                        result.success = False
+                        result.error_message = f"Execution failed: {exec_error}"
+                        result.steps_executed = all_steps_executed
+                        result.screenshots = []
+                        return result
+                else:
+                    logger.warning("No action returned")
+                    break
 
-                # Convert GraphSearchAgent result to our expected format
-                class UIAgentResult:
-                    success = True
-                    error_message = None
-                    steps_executed = actions if actions else []
-                    screenshots = []
-
-                result = UIAgentResult()
-                logger.debug(f"GraphSearchAgent completed successfully")
-                return result
-            else:
-                # MockAgent uses run() method
-                result = self._agent.run(prompt)
-                logger.debug(f"MockAgent result: success={result.success}")
-                return result
+            # Loop completed
+            logger.info(f"Agent S3 completed with {len(all_steps_executed)} steps")
+            class Result:
+                pass
+            result = Result()
+            result.success = len(all_steps_executed) > 0
+            result.error_message = None if all_steps_executed else "No actions executed"
+            result.steps_executed = all_steps_executed
+            result.screenshots = []
+            return result
 
         except Exception as e:
-            logger.error(f"Agent execution error: {e}")
-
-            # Return error result in expected format
-            class ErrorResult:
-                success = False
-                error_message = str(e)
-                steps_executed = []
-                screenshots = []
-
-            return ErrorResult()
+            logger.error(f"Agent S3 error: {e}")
+            import traceback
+            traceback.print_exc()
+            class Result:
+                pass
+            result = Result()
+            result.success = False
+            result.error_message = str(e)
+            result.steps_executed = all_steps_executed
+            result.screenshots = []
+            return result
 
 
 def create_agent(platform: Optional[str] = None) -> Agent:
     """
-    Create an Agent-S instance for the current or specified platform.
-
-    Args:
-        platform: "macos" or "windows" (auto-detected if None)
-
-    Returns:
-        Initialized Agent instance
-
-    Raises:
-        RuntimeError: If platform is unsupported or initialization fails
+    Create an Agent S3 instance for the current or specified platform.
     """
-    # Auto-detect platform if not specified
     if platform is None:
         if sys.platform == "darwin":
-            platform = "macos"
+            platform = "darwin"
         elif sys.platform == "win32":
             platform = "windows"
         else:
-            raise RuntimeError(f"Unsupported platform: {sys.platform}")
+            platform = "linux"
 
-    logger.info(f"Creating Agent-S for platform: {platform}")
-
-    if platform == "macos":
-        return _create_macos_agent()
-    elif platform == "windows":
-        return _create_windows_agent()
-    else:
-        raise RuntimeError(f"Unknown platform: {platform}")
-
-
-def _create_macos_agent() -> Agent:
-    """
-    Create Agent-S instance for macOS with MacOSACI driver.
-
-    Uses:
-    - MacOSACI: Vision-based GUI element detection
-    - Quartz APIs: Screen capture and mouse/keyboard control
-    - Accessibility API: Application window management
-    """
-    logger.info("Setting up macOS agent with MacOSACI driver")
-
-    driver = MacOSDriver()
+    logger.info(f"Creating Agent S3 for platform: {platform}")
 
     config = {
-        # Vision-based element detection
-        "use_screen_parsing": True,
-        "headless": False,  # We want to see what's happening
-
-        # Performance optimizations
-        "screenshot_cache_ttl": 1,  # Cache screenshots for 1s
-        "element_detection_timeout": 5,  # 5s max to find elements
-        "detection_confidence_threshold": 0.7,  # 70% confidence required
-        "use_region_detection": True,  # Only analyze relevant screen areas
-
-        # Debugging (disable in production)
-        "save_screenshots": True,
-        "screenshot_dir": "cache/agent_screenshots",
+        "max_trajectory_length": 5,
+        "enable_reflection": False,  # Disabled for speed
     }
 
-    agent = Agent(
-        platform="macos",
-        driver=driver,
-        config=config
-    )
-
-    agent.initialize()
-    return agent
-
-
-def _create_windows_agent() -> Agent:
-    """
-    Create Agent-S instance for Windows with WindowsACI driver.
-
-    Uses:
-    - WindowsACI: Vision-based GUI element detection
-    - Win32 APIs: Screen capture and mouse/keyboard control
-    - UI Automation: Application window management
-    """
-    logger.info("Setting up Windows agent with WindowsACI driver")
-
-    driver = WindowsDriver()
-
-    config = {
-        # Vision-based element detection
-        "use_screen_parsing": True,
-        "headless": False,
-
-        # Performance optimizations
-        "screenshot_cache_ttl": 1,
-        "element_detection_timeout": 5,
-        "detection_confidence_threshold": 0.7,
-        "use_region_detection": True,
-
-        # Debugging
-        "save_screenshots": True,
-        "screenshot_dir": "cache/agent_screenshots",
-    }
-
-    agent = Agent(
-        platform="windows",
-        driver=driver,
-        config=config
-    )
-
+    agent = Agent(platform=platform, config=config)
     agent.initialize()
     return agent
 
@@ -427,76 +295,14 @@ def _create_windows_agent() -> Agent:
 def validate_platform_requirements(platform: Optional[str] = None) -> dict[str, bool]:
     """
     Validate that all platform requirements are met.
-
-    Args:
-        platform: "macos" or "windows" (auto-detected if None)
-
-    Returns:
-        Dictionary of requirement checks:
-        - permissions_granted: bool
-        - required_apps_installed: bool
-        - driver_available: bool
     """
     if platform is None:
-        platform = "macos" if sys.platform == "darwin" else "windows"
+        platform = "darwin" if sys.platform == "darwin" else "windows"
 
-    logger.info(f"Validating {platform} requirements")
-
-    if platform == "macos":
-        return _validate_macos_requirements()
-    elif platform == "windows":
-        return _validate_windows_requirements()
-    else:
-        return {
-            "permissions_granted": False,
-            "required_apps_installed": False,
-            "driver_available": False,
-            "error": f"Unknown platform: {platform}"
-        }
-
-
-def _validate_macos_requirements() -> dict[str, bool]:
-    """Check macOS-specific requirements."""
-    import subprocess
-
-    checks = {}
-
-    # Check Accessibility permission
-    try:
-        result = subprocess.run(
-            ["osascript", "-e", 'tell application "System Events" to get properties'],
-            capture_output=True,
-            timeout=5
-        )
-        checks["accessibility_granted"] = result.returncode == 0
-    except Exception:
-        checks["accessibility_granted"] = False
-
-    # Check Screen Recording permission (harder to test programmatically)
-    checks["screen_recording_granted"] = True  # Assume granted, will fail on first screenshot if not
-
-    # Check if gui-agents is installed
-    try:
-        import gui_agents
-        checks["gui_agents_installed"] = True
-    except ImportError:
-        checks["gui_agents_installed"] = False
-
-    return checks
-
-
-def _validate_windows_requirements() -> dict[str, bool]:
-    """Check Windows-specific requirements."""
-    checks = {}
-
-    # Check if gui-agents is installed
-    try:
-        import gui_agents
-        checks["gui_agents_installed"] = True
-    except ImportError:
-        checks["gui_agents_installed"] = False
-
-    # Windows typically has fewer permission requirements
-    checks["uiautomation_available"] = True  # Built into Windows
+    checks = {
+        "gui_agents_installed": USE_AGENT_S3,
+        "api_key_available": bool(os.getenv("ANTHROPIC_API_KEY")),
+        "platform_supported": platform in ["darwin", "windows", "linux"],
+    }
 
     return checks

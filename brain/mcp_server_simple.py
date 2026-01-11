@@ -44,6 +44,7 @@ class ExecuteCommandRequest(BaseModel):
     prompt: str
     screenshot_before: bool = False
     screenshot_after: bool = True
+    force_agent_s: bool = False  # Skip AppleScript fast path, use Agent-S only
 
 
 class CaptureScreenRequest(BaseModel):
@@ -93,12 +94,13 @@ async def health_check():
 @app.post("/tools/execute_desktop_command")
 async def api_execute_desktop_command(request: ExecuteCommandRequest) -> ToolCallResponse:
     """Execute a desktop command via Agent-S."""
-    logger.info(f"Tool call: execute_desktop_command | prompt='{request.prompt}'")
+    logger.info(f"Tool call: execute_desktop_command | prompt='{request.prompt}'" + (" [FORCE AGENT-S]" if request.force_agent_s else ""))
 
     try:
         result = await execute_desktop_command(
             prompt=request.prompt,
-            screenshot_after=request.screenshot_after
+            screenshot_after=request.screenshot_after,
+            force_agent_s=request.force_agent_s
         )
 
         return ToolCallResponse(
