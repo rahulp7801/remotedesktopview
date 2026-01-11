@@ -436,7 +436,7 @@ async def _analyze_screenshot(screenshot_path: str) -> str:
         logger.info(f"Screenshot resized for analysis: {len(image_data) // 1024}KB")
 
         response = client.messages.create(
-            model="claude-4-5-sonnet-20251022",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=600,
             messages=[{
                 "role": "user",

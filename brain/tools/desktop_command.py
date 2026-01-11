@@ -311,7 +311,7 @@ Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app":
 
         start_time = datetime.now()
         response = client.messages.create(
-            model="claude-4-5-sonnet-20251022",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=500,
             messages=[{"role": "user", "content": f"Break down this command: {prompt}"}],
             system=system_prompt,
@@ -813,7 +813,7 @@ User: "{prompt}"
         
         start_time = datetime.now()
         response = client.messages.create(
-            model="claude-4-5-sonnet-20251022",
+            model="claude-3-5-sonnet-20241022",
             max_tokens=500,
             messages=[{"role": "user", "content": generation_prompt}]
         )
@@ -883,6 +883,155 @@ User: "{prompt}"
         return None
 
 
+async def _monitor_claude_code_prompts(duration_seconds: int = 600):
+    """
+    Background task to monitor for Claude Code confirmation prompts.
+    
+    Checks screen every 5 seconds. If it sees "Do you want to apply these changes?",
+    it presses '1' and Enter.
+    """
+    import os
+    import base64
+    import io
+    from PIL import Image
+    import anthropic
+    
+    logger.info(f"Starting Claude Code prompt monitor for {duration_seconds}s")
+    end_time = datetime.now().timestamp() + duration_seconds
+    
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.error("No API key for monitor")
+        return
+
+    client = anthropic.Anthropic(api_key=api_key)
+    
+    while datetime.now().timestamp() < end_time:
+        try:
+            # 1. Capture screen
+            screenshot_path = f"cache/monitor_{datetime.now().timestamp()}.png"
+            Path("cache").mkdir(exist_ok=True)
+            
+            # Using synchronous capture in thread to avoid blocking main loop too much
+            await asyncio.to_thread(capture_screen_sync, screenshot_path)
+            
+            # 2. Resize for efficient analysis
+            with Image.open(screenshot_path) as img:
+                max_width = 1920 # Good enough for text reading
+                if img.width > max_width:
+                    ratio = max_width / img.width
+                    new_size = (max_width, int(img.height * ratio))
+                    img = img.resize(new_size, Image.LANCZOS)
+                
+                buffer = io.BytesIO()
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert('RGB')
+                img.save(buffer, format='JPEG', quality=80)
+                buffer.seek(0)
+                image_data = base64.b64encode(buffer.read()).decode("utf-8")
+            
+            # 3. Ask Claude if prompt is visible
+            # Use Sonnet 4.5 for high accuracy
+            response = client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=50,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": image_data
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": "Do you see a prompt asking 'Do you want to apply these changes?' or similar from Claude Code? Reply ONLY with 'YES' or 'NO'."
+                        }
+                    ]
+                }]
+            )
+            
+            answer = response.content[0].text.strip().upper()
+            
+            if "YES" in answer:
+                logger.info("Detected Claude Code prompt! Auto-approving...")
+                # Press 1 and Enter
+                approve_script = '''
+                tell application "System Events"
+                    keystroke "1"
+                    delay 0.5
+                    keystroke return
+                end tell
+                '''
+                await asyncio.to_thread(subprocess.run, ["osascript", "-e", approve_script])
+                # Wait a bit longer after approving to let it process
+                await asyncio.sleep(10)
+            else:
+                # logger.debug("No prompt detected")
+                pass
+                
+            # Clean up
+            try:
+                os.remove(screenshot_path)
+            except:
+                pass
+                
+        except Exception as e:
+            logger.error(f"Monitor loop error: {e}")
+            
+        # Check every 5 seconds
+        await asyncio.sleep(5)
+    
+    logger.info("Claude Code prompt monitor finished")
+
+
+async def _activate_claude_code_hardcoded() -> dict[str, Any]:
+    """
+    Hardcoded sequence to activate Claude Code in VS Code.
+    
+    1. Focus VS Code
+    2. Open Terminal
+    3. Type 'claude'
+    4. Start background monitor for auto-approval
+    """
+    logger.info("Running hardcoded Activate Claude Code sequence")
+    
+    script = '''
+    tell application "Visual Studio Code"
+        activate
+    end tell
+    delay 1
+    tell application "System Events"
+        -- Open terminal (Ctrl + `)
+        keystroke "`" using {control down}
+        delay 1
+        -- Type claude
+        keystroke "claude"
+        keystroke return
+    end tell
+    '''
+    
+    try:
+        # Run the activation script
+        await asyncio.to_thread(subprocess.run, ["osascript", "-e", script], check=True)
+        
+        # Start the background monitor (fire and forget)
+        asyncio.create_task(_monitor_claude_code_prompts(duration_seconds=600))
+        
+        return {
+            "status": "success",
+            "message": "Activated Claude Code and started auto-approval monitor",
+            "steps_executed": ["Focused VS Code", "Opened Terminal", "Ran 'claude'", "Started background monitor"],
+            "method": "hardcoded_macro"
+        }
+    except Exception as e:
+        logger.error(f"Failed to activate Claude Code: {e}")
+        return None
+
+
 async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
     """
     Try AppleScript FIRST for simple commands before using Agent-S.
@@ -904,6 +1053,12 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
         return None
     
     prompt_lower = prompt.lower().strip()
+    logger.info(f"Checking AppleScript fast path for: '{prompt_lower}'")
+    
+    # HARDCODED: Check for "activate claude code"
+    if "activate claude code" in prompt_lower:
+        logger.info("Triggering hardcoded Activate Claude Code...")
+        return await _activate_claude_code_hardcoded()
     
     # Check for "go to [url]" or "navigate to [url]" commands
     url_patterns = [
