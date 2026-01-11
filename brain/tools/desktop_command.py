@@ -311,7 +311,7 @@ Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app":
 
         start_time = datetime.now()
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=500,
             messages=[{"role": "user", "content": f"Break down this command: {prompt}"}],
             system=system_prompt,
@@ -813,7 +813,7 @@ User: "{prompt}"
         
         start_time = datetime.now()
         response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
+            model="claude-sonnet-4-5-20250929",
             max_tokens=500,
             messages=[{"role": "user", "content": generation_prompt}]
         )
@@ -933,7 +933,7 @@ async def _monitor_claude_code_prompts(duration_seconds: int = 600):
             # 3. Ask Claude if prompt is visible
             # Use Sonnet 4.5 for high accuracy
             response = client.messages.create(
-                model="claude-3-5-sonnet-20241022",
+                model="claude-sonnet-4-5-20250929",
                 max_tokens=50,
                 messages=[{
                     "role": "user",
