@@ -109,14 +109,47 @@ def _generate_immediate_response(prompt: str) -> str:
     return "Working on it"
 
 
+def _is_complex_command(prompt: str) -> bool:
+    """
+    Detect if a command requires Agent S3 (complex) vs AppleScript (simple).
+    
+    Complex commands: search, click, type, navigate, scroll, find, send, etc.
+    Simple commands: just "open [app]"
+    """
+    prompt_lower = prompt.lower()
+    
+    # Complex action keywords that require Agent S3
+    complex_keywords = [
+        "search", "click", "type", "navigate", "scroll", "find", 
+        "send", "email", "compose", "write", "enter", "submit",
+        "select", "drag", "copy", "paste", "download", "upload",
+        "play", "pause", "stop", "next", "previous", "close",
+        "minimize", "maximize", "resize", "move", "switch",
+        "log in", "login", "sign in", "signin", "fill", "attach"
+    ]
+    
+    for keyword in complex_keywords:
+        if keyword in prompt_lower:
+            return True
+    
+    return False
+
+
 async def _execute_command_background(prompt: str, screenshot_after: bool, tool_call_id: str):
     """Execute the desktop command in the background (fire and forget)."""
     try:
         mcp_client = await get_mcp_client()
+        
+        # Auto-detect complex commands and force Agent S3
+        force_agent_s = _is_complex_command(prompt)
+        if force_agent_s:
+            logger.info(f"Complex command detected, forcing Agent S3 | prompt='{prompt}'")
+        
         result = await mcp_client.execute_desktop_command(
             prompt=prompt,
             screenshot_before=False,
-            screenshot_after=screenshot_after
+            screenshot_after=screenshot_after,
+            force_agent_s=force_agent_s
         )
 
         if result.get("status") == "success":

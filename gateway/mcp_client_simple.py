@@ -78,13 +78,14 @@ class SimpleMCPClient:
         self,
         prompt: str,
         screenshot_before: bool = False,
-        screenshot_after: bool = True
+        screenshot_after: bool = True,
+        force_agent_s: bool = False
     ) -> Dict[str, Any]:
         """Execute a desktop command via Agent-S."""
         if not self._connected or not self._client:
             raise RuntimeError("Not connected to MCP server. Call connect() first.")
 
-        logger.info(f"Calling execute_desktop_command | prompt='{prompt}'")
+        logger.info(f"Calling execute_desktop_command | prompt='{prompt}'" + (" [FORCE AGENT-S]" if force_agent_s else ""))
 
         try:
             response = await self._client.post(
@@ -92,7 +93,8 @@ class SimpleMCPClient:
                 json={
                     "prompt": prompt,
                     "screenshot_before": screenshot_before,
-                    "screenshot_after": screenshot_after
+                    "screenshot_after": screenshot_after,
+                    "force_agent_s": force_agent_s
                 }
             )
             response.raise_for_status()
