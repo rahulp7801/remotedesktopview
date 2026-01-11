@@ -41,6 +41,7 @@ class Agent:
         self.driver = driver
         self.config = config
         self._agent = None
+        self._grounding_agent = None  # Store reference for action execution
 
     def initialize(self):
         """Initialize the underlying Agent-S instance."""
@@ -56,11 +57,13 @@ class Agent:
 
                 # Create ACI driver instance
                 if self.platform == "macos":
-                    grounding_agent = MacOSACI(top_app_only=True, ocr=False)
+                    self._grounding_agent = MacOSACI(top_app_only=True, ocr=False)
                 elif self.platform == "windows":
-                    grounding_agent = WindowsOSACI(top_app_only=True, ocr=False)
+                    self._grounding_agent = WindowsOSACI(top_app_only=True, ocr=False)
                 else:
                     raise ValueError(f"Unsupported platform: {self.platform}")
+                
+                grounding_agent = self._grounding_agent
 
                 # Get Anthropic API key from environment
                 anthropic_api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -200,7 +203,7 @@ class Agent:
                         raise RuntimeError(f"Cannot create observation for Agent-S: {e2}")
 
                 try:
-                    action, trace = self._agent.predict(prompt, observation)
+                    info, actions = self._agent.predict(prompt, observation)
                 except IndexError as e:
                     # This occurs when the LLM planner returns an empty subtask list
                     # and the agent tries to pop from it (subtasks.pop(0))
@@ -218,11 +221,75 @@ class Agent:
                     
                     return PlannerFailureResult()
 
+                # Check if the agent returned DONE or FAIL
+                if actions and len(actions) > 0:
+                    action_str = actions[0].lower() if actions[0] else ""
+                    
+                    if "done" in action_str or "fail" in action_str:
+                        logger.info(f"Agent-S completed with: {action_str}")
+                        
+                        class UIAgentResult:
+                            success = "done" in action_str
+                            error_message = None if "done" in action_str else "Agent reported failure"
+                            steps_executed = [action_str]
+                            screenshots = []
+                        
+                        return UIAgentResult()
+                    
+                    # Actually execute the action using the grounding agent
+                    # The action can be either:
+                    # - pyautogui code: "import pyautogui; pyautogui.click(100, 200)"
+                    # - ACI method: "click(5)" or "open('Safari')"
+                    logger.info(f"Executing action: {actions[0]}")
+                    
+                    try:
+                        import time
+                        import pyautogui
+                        time.sleep(0.5)  # Small delay before action
+                        
+                        # Execute the action - include both pyautogui and ACI methods
+                        # The agent may generate either style depending on action_space config
+                        exec_globals = {
+                            "__builtins__": __builtins__,
+                            "pyautogui": pyautogui,
+                            "time": time,
+                        }
+                        exec_locals = {
+                            # ACI methods from grounding agent
+                            "open": self._grounding_agent.open,
+                            "click": self._grounding_agent.click,
+                            "type": self._grounding_agent.type,
+                            "scroll": self._grounding_agent.scroll,
+                            "hotkey": self._grounding_agent.hotkey,
+                            "wait": self._grounding_agent.wait,
+                            "done": self._grounding_agent.done,
+                            "fail": self._grounding_agent.fail,
+                            "switch_applications": self._grounding_agent.switch_applications,
+                            "hold_and_press": self._grounding_agent.hold_and_press,
+                            "drag_and_drop": self._grounding_agent.drag_and_drop,
+                        }
+                        
+                        exec(actions[0], exec_globals, exec_locals)
+                        
+                        time.sleep(0.5)  # Small delay after action
+                        logger.info(f"Action executed successfully: {actions[0]}")
+                        
+                    except Exception as exec_error:
+                        logger.error(f"Failed to execute action '{actions[0]}': {exec_error}")
+                        
+                        class ExecFailureResult:
+                            success = False
+                            error_message = f"Failed to execute: {exec_error}"
+                            steps_executed = [actions[0]]
+                            screenshots = []
+                        
+                        return ExecFailureResult()
+
                 # Convert GraphSearchAgent result to our expected format
                 class UIAgentResult:
                     success = True
                     error_message = None
-                    steps_executed = trace if trace else []
+                    steps_executed = actions if actions else []
                     screenshots = []
 
                 result = UIAgentResult()

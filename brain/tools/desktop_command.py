@@ -42,6 +42,21 @@ async def execute_desktop_command(
     logger.info(f"Executing command: {prompt}")
 
     try:
+        # For simple "open [app]" commands, use AppleScript directly
+        # This is more reliable than pyautogui which requires accessibility permissions
+        applescript_result = await _try_applescript_first(prompt)
+        if applescript_result:
+            logger.info(f"Command executed via AppleScript: {applescript_result['message']}")
+            
+            # Capture verification screenshot if requested
+            if screenshot_after:
+                screenshot_path = f"cache/after_{datetime.now().timestamp()}.png"
+                await asyncio.to_thread(capture_screen_sync, screenshot_path)
+                applescript_result["screenshot_path"] = screenshot_path
+            
+            return applescript_result
+
+        # For complex commands, use Agent-S
         # Get Agent-S instance
         agent = await get_agent_instance()
 
@@ -100,6 +115,117 @@ async def execute_desktop_command(
             "error_type": type(e).__name__,
             "prompt": prompt
         }
+
+
+async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
+    """
+    Try AppleScript FIRST for simple commands before using Agent-S.
+    
+    This handles common cases like "open Safari" that are simple enough
+    to do directly without Agent-S LLM reasoning and pyautogui.
+    
+    Args:
+        prompt: The command to execute
+        
+    Returns:
+        Success dict if AppleScript worked, None if command isn't simple enough
+    """
+    # Only works on macOS
+    if sys.platform != "darwin":
+        return None
+    
+    # Check if this is a simple "open [app]" command
+    prompt_lower = prompt.lower().strip()
+    
+    # Match patterns like "open safari", "launch chrome", "start finder"
+    open_patterns = ["open ", "launch ", "start "]
+    app_name = None
+    
+    for pattern in open_patterns:
+        if prompt_lower.startswith(pattern):
+            # Extract what comes after "open "
+            remainder = prompt_lower[len(pattern):].strip()
+            # Remove common suffixes
+            for suffix in [" application", " app", " browser", " on my computer", " on my mac"]:
+                if remainder.endswith(suffix):
+                    remainder = remainder[:-len(suffix)].strip()
+            app_name = remainder
+            break
+    
+    if not app_name:
+        # Not a simple open command, let Agent-S handle it
+        return None
+    
+    logger.info(f"Using AppleScript to open: {app_name}")
+    
+    # Map common names to actual app names
+    app_name_mapping = {
+        "safari": "Safari",
+        "chrome": "Google Chrome",
+        "google chrome": "Google Chrome",
+        "firefox": "Firefox",
+        "finder": "Finder",
+        "mail": "Mail",
+        "messages": "Messages",
+        "notes": "Notes",
+        "calendar": "Calendar",
+        "photos": "Photos",
+        "music": "Music",
+        "terminal": "Terminal",
+        "settings": "System Settings",
+        "system settings": "System Settings",
+        "system preferences": "System Preferences",
+        "slack": "Slack",
+        "discord": "Discord",
+        "zoom": "zoom.us",
+        "teams": "Microsoft Teams",
+        "vscode": "Visual Studio Code",
+        "visual studio code": "Visual Studio Code",
+        "spotify": "Spotify",
+        "xcode": "Xcode",
+        "word": "Microsoft Word",
+        "excel": "Microsoft Excel",
+        "powerpoint": "Microsoft PowerPoint",
+        "preview": "Preview",
+        "textedit": "TextEdit",
+        "activity monitor": "Activity Monitor",
+    }
+    
+    # Get the proper app name
+    actual_app_name = app_name_mapping.get(app_name.lower(), app_name.title())
+    
+    try:
+        # Use AppleScript to open the application
+        applescript = f'tell application "{actual_app_name}" to activate'
+        
+        start_time = datetime.now()
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["osascript", "-e", applescript],
+            capture_output=True,
+            timeout=10
+        )
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        if result.returncode == 0:
+            logger.info(f"AppleScript succeeded: opened {actual_app_name} in {execution_time:.2f}s")
+            return {
+                "status": "success",
+                "message": f"Opening {actual_app_name}",
+                "steps_executed": [f"AppleScript: activate {actual_app_name}"],
+                "execution_time_seconds": execution_time,
+                "method": "applescript",
+            }
+        else:
+            stderr = result.stderr.decode() if result.stderr else ""
+            logger.warning(f"AppleScript failed: {stderr}")
+            # Return None to let Agent-S try
+            return None
+            
+    except Exception as e:
+        logger.warning(f"AppleScript error: {e}")
+        # Return None to let Agent-S try
+        return None
 
 
 async def _try_applescript_fallback(prompt: str, error_message: str) -> Optional[dict[str, Any]]:
