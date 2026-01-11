@@ -125,6 +125,7 @@ Your task: Analyze each user voice command and output ONLY one of these two word
 - Opens an application by name (e.g., "open Safari", "launch Mail")
 - Opens a specific URL or website (e.g., "go to YouTube.com", "open Netflix")
 - Performs a Google search (e.g., "search for weather", "Google best restaurants", "search for cats in Safari")
+- Opens a standard folder by name (e.g., "open Downloads", "go to Documents folder", "show Desktop")
 - Does basic Finder operations (e.g., "open a new Finder window")
 - Combines two simple actions (e.g., "Open Safari and go to YouTube")
 - Requires NO visual analysis or UI element interaction
@@ -166,6 +167,18 @@ User: "New Finder window"
 Output: AppleScript
 
 User: "Open Mail"
+Output: AppleScript
+
+User: "Open Downloads folder"
+Output: AppleScript
+
+User: "Go to my Documents"
+Output: AppleScript
+
+User: "Show Desktop folder"
+Output: AppleScript
+
+User: "Open Applications"
 Output: AppleScript
 
 User: "Click the buy now button"

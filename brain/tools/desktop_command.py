@@ -216,6 +216,134 @@ async def _execute_search_applescript(search_query: str) -> Optional[dict[str, A
         return None
 
 
+async def _generate_and_execute_applescript(prompt: str) -> Optional[dict[str, Any]]:
+    """
+    Use Claude to dynamically generate AppleScript for the user's command.
+    
+    This is a general-purpose approach that:
+    - Understands context (e.g., "Downloads in Finder" = the folder)
+    - Generates appropriate AppleScript for any macOS automation task
+    - Is not hardcoded for specific commands
+    - Falls back to None if the command is too complex for AppleScript
+    
+    Args:
+        prompt: The user's natural language command
+        
+    Returns:
+        Success dict if AppleScript worked, None if command needs Agent S3
+    """
+    import os
+    
+    try:
+        import anthropic
+    except ImportError:
+        logger.warning("anthropic package not installed for AppleScript generation")
+        return None
+    
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.warning("ANTHROPIC_API_KEY not set for AppleScript generation")
+        return None
+    
+    # Prompt Claude to generate AppleScript
+    generation_prompt = f'''You are a macOS automation expert. Generate AppleScript to accomplish the user's task.
+
+RULES:
+1. Output ONLY the AppleScript code, nothing else (no markdown, no explanation)
+2. If the task CANNOT be done with AppleScript alone (requires visual analysis, clicking specific UI elements by appearance, or complex multi-step reasoning), output exactly: NEEDS_VISION
+3. Use proper macOS paths (e.g., "Downloads" folder = folder "Downloads" of home)
+4. Keep scripts simple and reliable
+5. Include small delays where needed for UI responsiveness
+
+EXAMPLES:
+
+User: "Open the Downloads folder"
+tell application "Finder"
+    activate
+    open folder "Downloads" of home
+end tell
+
+User: "Open Documents in Finder"
+tell application "Finder"
+    activate
+    open folder "Documents" of home
+end tell
+
+User: "Create a new note"
+tell application "Notes"
+    activate
+    make new note
+end tell
+
+User: "Open Terminal and run a command"
+NEEDS_VISION
+
+User: "Click the submit button"
+NEEDS_VISION
+
+User: "Find my most recent download and open it"
+NEEDS_VISION
+
+User: "{prompt}"
+'''
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        
+        start_time = datetime.now()
+        response = client.messages.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=500,
+            messages=[{"role": "user", "content": generation_prompt}]
+        )
+        
+        generated_script = response.content[0].text.strip()
+        generation_time = (datetime.now() - start_time).total_seconds()
+        
+        logger.info(f"AppleScript generation took {generation_time:.2f}s")
+        
+        # Check if Claude says this needs vision
+        if "NEEDS_VISION" in generated_script:
+            logger.info(f"LLM determined command needs vision: {prompt}")
+            return None
+        
+        # Validate it looks like AppleScript (basic check)
+        if not any(keyword in generated_script.lower() for keyword in ["tell", "application", "activate", "open", "keystroke"]):
+            logger.warning(f"Generated script doesn't look like AppleScript: {generated_script[:100]}")
+            return None
+        
+        logger.info(f"Generated AppleScript: {generated_script[:100]}...")
+        
+        # Execute the generated AppleScript
+        exec_start = datetime.now()
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["osascript", "-e", generated_script],
+            capture_output=True,
+            timeout=15
+        )
+        execution_time = (datetime.now() - exec_start).total_seconds()
+        total_time = (datetime.now() - start_time).total_seconds()
+        
+        if result.returncode == 0:
+            logger.info(f"LLM-generated AppleScript succeeded in {total_time:.2f}s (gen: {generation_time:.2f}s, exec: {execution_time:.2f}s)")
+            return {
+                "status": "success",
+                "message": f"Done",
+                "steps_executed": [f"LLM-generated AppleScript executed"],
+                "execution_time_seconds": total_time,
+                "method": "llm_applescript",
+            }
+        else:
+            stderr = result.stderr.decode() if result.stderr else ""
+            logger.warning(f"LLM-generated AppleScript failed: {stderr}")
+            return None
+            
+    except Exception as e:
+        logger.warning(f"AppleScript generation/execution error: {e}")
+        return None
+
+
 async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
     """
     Try AppleScript FIRST for simple commands before using Agent-S.
@@ -286,7 +414,13 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
             break
     
     if not app_name:
-        # Not a simple open command, let Agent-S handle it
+        # Not a simple "open [app]" command
+        # Try LLM-generated AppleScript before falling back to Agent S3
+        logger.info(f"Command not a simple app open, trying LLM-generated AppleScript: {prompt}")
+        llm_result = await _generate_and_execute_applescript(prompt)
+        if llm_result:
+            return llm_result
+        # LLM said this needs vision or failed, let Agent-S handle it
         return None
     
     logger.info(f"Using AppleScript to open: {app_name}")
@@ -361,12 +495,19 @@ async def _try_applescript_first(prompt: str) -> Optional[dict[str, Any]]:
         else:
             stderr = result.stderr.decode() if result.stderr else ""
             logger.warning(f"AppleScript failed: {stderr}")
-            # Return None to let Agent-S try
+            # Simple AppleScript failed, try LLM-generated AppleScript
+            logger.info(f"Simple AppleScript failed, trying LLM-generated AppleScript")
+            llm_result = await _generate_and_execute_applescript(prompt)
+            if llm_result:
+                return llm_result
             return None
             
     except Exception as e:
         logger.warning(f"AppleScript error: {e}")
-        # Return None to let Agent-S try
+        # Try LLM-generated AppleScript before giving up
+        llm_result = await _generate_and_execute_applescript(prompt)
+        if llm_result:
+            return llm_result
         return None
 
 
