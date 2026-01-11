@@ -1,3 +1,40 @@
-claude.md
+# Environment configuration
 .env
-/.venv
+.env.local
+
+# Virtual environments
+.venv
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project-specific
+claude.md
+cache/
+logs/
+*.log
+
+# Screenshots
+*.png
+*.jpg
+*.jpeg
+
+# Temporary files
+.DS_Store
+*.tmp

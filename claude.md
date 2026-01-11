@@ -47,7 +47,10 @@ Projects evaluated on:
 
 This is a voice-controlled agent that lets you call your Mac from your phone and control it naturally through speech. Say "open my email" or "find that document from last week" and the agent will navigate your desktop, click through interfaces, and complete tasks—all while you're away from your computer.
 
-**Why we built this:** Traditional remote desktop tools require you to manually navigate UIs on a tiny phone screen. This agent uses speech recognition, AI reasoning, and GUI automation to handle complex desktop tasks through simple voice commands.
+**Why we built this:** Traditional remote desktop tools require you to manually navigate UIs on a tiny phone screen. This agent uses speech recognition, AI reasoning, and GUI automation to handle complex desktop tasks through simple voice commands. 
+
+# THIS IS VERY IMPORTANT
+Our end goal is to build a tool that allows us to complete tasks that would normally be impossible or very hard to do if you only had your phone. 
 
 **Core workflow:**
 1. You speak a command into your phone
