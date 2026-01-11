@@ -124,7 +124,7 @@ async def _capture_screenshot_for_planning() -> str | None:
 
         # Read and resize for Claude vision (max 5MB, resize to 1280px width)
         with Image.open(screenshot_path) as img:
-            max_width = 1280
+            max_width = 2560
             if img.width > max_width:
                 ratio = max_width / img.width
                 new_size = (max_width, int(img.height * ratio))
@@ -311,7 +311,7 @@ Output: [{"step": "Open Downloads folder", "method": "applescript", "focus_app":
 
         start_time = datetime.now()
         response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-4-5-sonnet-20251022",
             max_tokens=500,
             messages=[{"role": "user", "content": f"Break down this command: {prompt}"}],
             system=system_prompt,
@@ -813,7 +813,7 @@ User: "{prompt}"
         
         start_time = datetime.now()
         response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
+            model="claude-4-5-sonnet-20251022",
             max_tokens=500,
             messages=[{"role": "user", "content": generation_prompt}]
         )

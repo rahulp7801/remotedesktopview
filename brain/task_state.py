@@ -169,14 +169,35 @@ class TaskStateManager:
                 except Exception as e:
                     logger.error(f"Progress callback error: {e}")
 
+    def _restore_previous_context(self, finished_task_id: str):
+        """
+        If the finished task was the current one, restore context to another active task.
+        This handles cases where a short task (like checking status) interrupts a long one.
+        """
+        if self._current_task_id == finished_task_id:
+            # Look for other in-progress tasks
+            active_tasks = [
+                t for t in self._tasks.values() 
+                if t.status == TaskStatus.IN_PROGRESS and t.id != finished_task_id
+            ]
+            
+            if active_tasks:
+                # Restore the most recently started active task
+                # (Or the one that was running before this one)
+                active_tasks.sort(key=lambda t: t.started_at, reverse=True)
+                restored = active_tasks[0]
+                self._current_task_id = restored.id
+                logger.info(f"Restored context to active task {restored.id}: {restored.prompt[:50]}...")
+            else:
+                self._current_task_id = None
+
     def complete_task(self, task_id: str, result: dict):
         """Mark a task as completed."""
         task = self._tasks.get(task_id)
         if task:
             task.complete(result)
             self._task_history.append(task)
-            if self._current_task_id == task_id:
-                self._current_task_id = None
+            self._restore_previous_context(task_id)
 
     def fail_task(self, task_id: str, error: str):
         """Mark a task as failed."""
@@ -184,8 +205,7 @@ class TaskStateManager:
         if task:
             task.fail(error)
             self._task_history.append(task)
-            if self._current_task_id == task_id:
-                self._current_task_id = None
+            self._restore_previous_context(task_id)
 
     def get_task(self, task_id: str) -> Optional[Task]:
         """Get a task by ID."""
@@ -398,7 +418,7 @@ async def _analyze_screenshot(screenshot_path: str) -> str:
         # Retina screenshots are huge (3600x2338 = ~15MB), resize to 1280px width
         with Image.open(screenshot_path) as img:
             # Calculate new dimensions (maintain aspect ratio)
-            max_width = 1280
+            max_width = 2560
             if img.width > max_width:
                 ratio = max_width / img.width
                 new_size = (max_width, int(img.height * ratio))
@@ -415,11 +435,9 @@ async def _analyze_screenshot(screenshot_path: str) -> str:
 
         logger.info(f"Screenshot resized for analysis: {len(image_data) // 1024}KB")
 
-        client = anthropic.Anthropic(api_key=api_key)
-
         response = client.messages.create(
-            model="claude-3-5-haiku-20241022",
-            max_tokens=300,
+            model="claude-4-5-sonnet-20251022",
+            max_tokens=600,
             messages=[{
                 "role": "user",
                 "content": [
@@ -433,12 +451,16 @@ async def _analyze_screenshot(screenshot_path: str) -> str:
                     },
                     {
                         "type": "text",
-                        "text": """Describe what's on this macOS screen in 2-3 sentences. Focus on:
-- What application is open/active
-- What the user appears to be doing
-- Any notable content or state (emails, files, dialogs, etc.)
+                        "text": """Analyze this macOS screen and provide a factual description for a blind user.
+                        
+CRITICAL DETAILS TO EXTRACT:
+1. Active Application: Exact name of the frontmost app.
+2. Window Title: verification_screen.png for example.
+3. Key Content: Read any visible filenames, huge text, or specific status messages.
+4. Context: What is the user likely doing?
 
-Be concise and factual. This is for a voice assistant to report to the user."""
+Format: "The user is in [App] [doing X]. The screen shows [details]. I see files named: [list specific filenames]."
+Keep it under 3 sentences but be PRECISE with names."""
                     }
                 ]
             }]
