@@ -435,6 +435,15 @@ async def _analyze_screenshot(screenshot_path: str) -> str:
 
         logger.info(f"Screenshot resized for analysis: {len(image_data) // 1024}KB")
 
+        import os
+        import anthropic
+        api_key = os.getenv("ANTHROPIC_API_KEY")
+        if not api_key:
+            logger.error("No API key for screen analysis")
+            return "Reference the last known state."
+            
+        client = anthropic.Anthropic(api_key=api_key)
+
         response = client.messages.create(
             model="claude-sonnet-4-5-20250929",
             max_tokens=600,

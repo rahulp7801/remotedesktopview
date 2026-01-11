@@ -109,7 +109,7 @@ async def health_check():
             "get_active_applications",
             "get_status",
             "describe_screen",
-            "execute_claude_code"
+            # "execute_claude_code"  # Disabled to force visual activation via desktop_command
         ],
         "claude_cli_available": claude_cli_available,
         "timestamp": datetime.now().isoformat()
